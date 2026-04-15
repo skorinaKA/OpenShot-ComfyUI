@@ -4,28 +4,28 @@ import time
 import venv
 
 
-AUDIOSR_ENV_VERSION = "6"
+LAVASR_ENV_VERSION = "1"
 
 
 def _log(message):
-    print("[OpenShot-ComfyUI:AudioSR] {}".format(message), flush=True)
+    print("[OpenShot-ComfyUI:LavaSR] {}".format(message), flush=True)
 
 
-def audiosr_env_dir(base_dir):
-    path = os.path.join(base_dir, ".openshot_envs", "audiosr")
+def lavasr_env_dir(base_dir):
+    path = os.path.join(base_dir, ".openshot_envs", "lavasr")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
 
-def audiosr_python_path(base_dir):
-    env_dir = audiosr_env_dir(base_dir)
+def lavasr_python_path(base_dir):
+    env_dir = lavasr_env_dir(base_dir)
     if os.name == "nt":
         return os.path.join(env_dir, "Scripts", "python.exe")
     return os.path.join(env_dir, "bin", "python")
 
 
-def audiosr_runner_path(base_dir):
-    return os.path.join(base_dir, "audiosr_runner.py")
+def lavasr_runner_path(base_dir):
+    return os.path.join(base_dir, "lavasr_runner.py")
 
 
 def run_checked(cmd, error_prefix):
@@ -55,7 +55,7 @@ def run_checked(cmd, error_prefix):
         raise RuntimeError("{}: {}".format(error_prefix, err))
 
 
-def audiosr_env_needs_refresh(marker_path, python_path):
+def lavasr_env_needs_refresh(marker_path, python_path):
     if not os.path.isfile(marker_path) or not os.path.isfile(python_path):
         return True
     try:
@@ -63,16 +63,16 @@ def audiosr_env_needs_refresh(marker_path, python_path):
             lines = [line.strip() for line in handle.readlines() if line.strip()]
     except Exception:
         return True
-    return (not lines) or lines[0] != AUDIOSR_ENV_VERSION
+    return (not lines) or lines[0] != LAVASR_ENV_VERSION
 
 
-def ensure_audiosr_environment(base_dir):
-    env_dir = audiosr_env_dir(base_dir)
-    python_path = audiosr_python_path(base_dir)
+def ensure_lavasr_environment(base_dir):
+    env_dir = lavasr_env_dir(base_dir)
+    python_path = lavasr_python_path(base_dir)
     marker_path = os.path.join(env_dir, ".ready")
-    runner_path = audiosr_runner_path(base_dir)
+    runner_path = lavasr_runner_path(base_dir)
 
-    if not audiosr_env_needs_refresh(marker_path, python_path):
+    if not lavasr_env_needs_refresh(marker_path, python_path):
         _log("Using existing isolated environment: {}".format(env_dir))
         return python_path
 
@@ -86,8 +86,8 @@ def ensure_audiosr_environment(base_dir):
         builder.create(env_dir)
 
     _log("Bootstrapping pip/setuptools/wheel")
-    run_checked([python_path, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], "AudioSR pip bootstrap failed")
-    _log("Installing AudioSR core package")
+    run_checked([python_path, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], "LavaSR pip bootstrap failed")
+    _log("Installing LavaSR")
     run_checked(
         [
             python_path,
@@ -95,50 +95,17 @@ def ensure_audiosr_environment(base_dir):
             "pip",
             "install",
             "--upgrade",
-            "--no-deps",
-            "audiosr==0.0.7",
-        ],
-        "AudioSR core package install failed",
-    )
-    _log("Installing AudioSR dependency stack")
-    run_checked(
-        [
-            python_path,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "numpy<=1.23.5",
-            "librosa==0.9.2",
-            "transformers==4.30.2",
-            "soundfile",
-            "phonemizer",
-            "torchlibrosa>=0.0.9",
-            "tqdm",
-            "progressbar",
-            "ipdb",
-            "dlinfo",
-            "segments",
-            "csvw",
-            "language-tags",
-            "ftfy",
-            "einops",
-            "pandas",
-            "unidecode",
-            "chardet",
-            "pyyaml",
-            "gradio",
+            "git+https://github.com/ysharma3501/LavaSR.git",
             "huggingface-hub",
-            "scipy",
-            "timm",
         ],
-        "AudioSR dependency install failed",
+        "LavaSR dependency install failed",
     )
 
     with open(marker_path, "w", encoding="utf-8") as handle:
-        handle.write("{}\n".format(AUDIOSR_ENV_VERSION))
+        handle.write("{}\n".format(LAVASR_ENV_VERSION))
         handle.write("{}\n".format(time.time()))
     if not os.path.isfile(runner_path):
-        raise RuntimeError("AudioSR runner script not found: {}".format(runner_path))
+        raise RuntimeError("LavaSR runner script not found: {}".format(runner_path))
     _log("Isolated environment ready")
     return python_path
+

@@ -6,7 +6,6 @@ import shutil
 import sys
 import time
 import tempfile
-import venv
 import wave
 from contextlib import nullcontext
 from urllib.parse import urlparse
@@ -18,9 +17,9 @@ import torch.nn.functional as F
 from torch.hub import download_url_to_file
 from PIL import Image
 try:
-    from .audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment, run_checked
+    from .lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment, run_checked
 except Exception:
-    from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment, run_checked
+    from lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment, run_checked
 
 import comfy.model_management as mm
 from comfy.utils import ProgressBar, common_upscale
@@ -64,12 +63,6 @@ except Exception as ex:  # pragma: no cover - runtime env specific
     _deepfilternet_import_error = ex
 else:
     _deepfilternet_import_error = None
-
-try:
-    import torchvision
-except Exception:
-    torchvision = None
-
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
@@ -149,11 +142,9 @@ def _require_deepfilternet():
         )
 
 
-def _require_audiosr_bootstrap():
+def _require_lavasr_bootstrap():
     if torchaudio is None:
-        raise RuntimeError("AudioSR bootstrap requires torchaudio in the main Comfy environment")
-    if torchvision is None:
-        raise RuntimeError("AudioSR bootstrap requires torchvision in the main Comfy environment")
+        raise RuntimeError("LavaSR bootstrap requires torchaudio in the main Comfy environment")
 
 
 def _model_storage_dir():
@@ -1174,13 +1165,13 @@ def _deepfilternet_runner_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepfilternet_runner.py")
 
 
-def _audiosr_runner_path():
-    return audiosr_runner_path(os.path.dirname(os.path.abspath(__file__)))
+def _lavasr_runner_path():
+    return lavasr_runner_path(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _ensure_audiosr_environment():
-    _require_audiosr_bootstrap()
-    return ensure_audiosr_environment(os.path.dirname(os.path.abspath(__file__)))
+def _ensure_lavasr_environment():
+    _require_lavasr_bootstrap()
+    return ensure_lavasr_environment(os.path.dirname(os.path.abspath(__file__)))
 
 
 class OpenShotSceneRangesFromSegments:
@@ -2949,7 +2940,7 @@ class OpenShotDeepFilterNetDenoiseAudio:
         return (output_path,)
 
 
-class OpenShotAudioSRClarity:
+class OpenShotLavaSRSpeechClarity:
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return ""
@@ -2959,7 +2950,6 @@ class OpenShotAudioSRClarity:
         return {
             "required": {
                 "source_audio_path": ("STRING", {"default": ""}),
-                "model_name": (["speech", "basic"], {"default": "speech"}),
                 "keep_model_loaded": ("BOOLEAN", {"default": True}),
             },
             "optional": {
@@ -2968,7 +2958,7 @@ class OpenShotAudioSRClarity:
         }
 
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("clarified_audio_path",)
+    RETURN_NAMES = ("clarified_speech_audio_path",)
     FUNCTION = "enhance"
     CATEGORY = "OpenShot/Audio"
 
@@ -2979,21 +2969,20 @@ class OpenShotAudioSRClarity:
             raise ValueError("Audio path not found: {}".format(source_audio_path))
         return source_path
 
-    def _build_output_path(self, source_path, model_name):
+    def _build_output_path(self, source_path):
         output_dir = os.path.join(_safe_output_directory(), "openshot_audio")
         os.makedirs(output_dir, exist_ok=True)
         stem = _sanitize_filename_part(os.path.splitext(os.path.basename(source_path))[0], default="audio")
         stat = os.stat(source_path)
-        key = "{}|{}|{}|{}".format(
+        key = "{}|{}|{}".format(
             source_path,
             int(stat.st_mtime_ns),
             int(stat.st_size),
-            str(model_name or "basic"),
         )
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
-        return os.path.join(output_dir, "{}_clarity_{}_{}.flac".format(stem, str(model_name), digest))
+        return os.path.join(output_dir, "{}_clarity_speech_{}.flac".format(stem, digest))
 
-    def enhance(self, source_audio_path, model_name, keep_model_loaded, audio=None):
+    def enhance(self, source_audio_path, keep_model_loaded, audio=None):
         temp_source_dir = None
         if audio is not None:
             temp_source_dir = tempfile.mkdtemp(prefix="openshot_audio_input_", dir=folder_paths.get_temp_directory())
@@ -3002,16 +2991,16 @@ class OpenShotAudioSRClarity:
         else:
             source_path = self._resolve_source_path(source_audio_path)
 
-        output_path = self._build_output_path(source_path, model_name)
+        output_path = self._build_output_path(source_path)
         if os.path.isfile(output_path):
             if temp_source_dir:
                 shutil.rmtree(temp_source_dir, ignore_errors=True)
             return (output_path,)
 
-        runner = _audiosr_runner_path()
+        runner = _lavasr_runner_path()
         if not os.path.isfile(runner):
-            raise RuntimeError("AudioSR runner script not found: {}".format(runner))
-        python_path = _ensure_audiosr_environment()
+            raise RuntimeError("LavaSR runner script not found: {}".format(runner))
+        python_path = _ensure_lavasr_environment()
 
         cmd = [
             python_path,
@@ -3020,20 +3009,18 @@ class OpenShotAudioSRClarity:
             source_path,
             "--output",
             output_path,
-            "--model-name",
-            str(model_name or "basic"),
         ]
         if not bool(keep_model_loaded):
             cmd.append("--release-model")
 
         try:
-            run_checked(cmd, "AudioSR enhancement failed")
+            run_checked(cmd, "LavaSR enhancement failed")
         finally:
             if temp_source_dir:
                 shutil.rmtree(temp_source_dir, ignore_errors=True)
 
         if not os.path.isfile(output_path):
-            raise RuntimeError("AudioSR enhancement did not produce output: {}".format(output_path))
+            raise RuntimeError("LavaSR enhancement did not produce output: {}".format(output_path))
         return (output_path,)
 
 
@@ -3193,7 +3180,7 @@ NODE_CLASS_MAPPINGS = {
     "OpenShotImageBlurMasked": OpenShotImageBlurMasked,
     "OpenShotImageHighlightMasked": OpenShotImageHighlightMasked,
     "OpenShotDeepFilterNetDenoiseAudio": OpenShotDeepFilterNetDenoiseAudio,
-    "OpenShotAudioSRClarity": OpenShotAudioSRClarity,
+    "OpenShotLavaSRSpeechClarity": OpenShotLavaSRSpeechClarity,
     "OpenShotGroundingDinoDetect": OpenShotGroundingDinoDetect,
     "OpenShotSceneRangesFromSegments": OpenShotSceneRangesFromSegments,
 }
@@ -3207,7 +3194,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenShotImageBlurMasked": "OpenShot Blur Masked (Skip Empty)",
     "OpenShotImageHighlightMasked": "OpenShot Highlight Masked",
     "OpenShotDeepFilterNetDenoiseAudio": "OpenShot DeepFilterNet Audio Denoise",
-    "OpenShotAudioSRClarity": "OpenShot AudioSR Clarity",
+    "OpenShotLavaSRSpeechClarity": "OpenShot LavaSR Speech Clarity",
     "OpenShotGroundingDinoDetect": "OpenShot GroundingDINO Detect",
     "OpenShotSceneRangesFromSegments": "OpenShot Scene Ranges From Segments",
 }

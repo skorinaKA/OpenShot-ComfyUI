@@ -4,9 +4,9 @@ import shutil
 import subprocess
 import sys
 try:
-    from .audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment
+    from .lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment
 except Exception:
-    from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment
+    from lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment
 
 
 BASE_REQUIRED_MODULES = [
@@ -36,7 +36,7 @@ EXPECTED_NODES = [
     "OpenShotImageBlurMasked",
     "OpenShotImageHighlightMasked",
     "OpenShotDeepFilterNetDenoiseAudio",
-    "OpenShotAudioSRClarity",
+    "OpenShotLavaSRSpeechClarity",
     "OpenShotGroundingDinoDetect",
     "OpenShotSceneRangesFromSegments",
 ]
@@ -114,24 +114,24 @@ def check_deepfilternet_runner():
         return False
 
 
-def check_audiosr_runner():
+def check_lavasr_runner():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    runner = audiosr_runner_path(base_dir)
+    runner = lavasr_runner_path(base_dir)
     if not os.path.isfile(runner):
-        print("[FAIL] audiosr runner missing: {}".format(runner))
+        print("[FAIL] lavasr runner missing: {}".format(runner))
         return False
-    if not module_available("torch") or not module_available("torchaudio") or not module_available("torchvision"):
-        print("[OK]   audiosr runner present (skipping isolated env probe; main torch/torchaudio/torchvision not available)")
+    if not module_available("torch") or not module_available("torchaudio"):
+        print("[OK]   lavasr runner present (skipping isolated env probe; main torch/torchaudio not available)")
         return True
     try:
-        python_path = ensure_audiosr_environment(base_dir)
+        python_path = ensure_lavasr_environment(base_dir)
     except Exception as ex:
-        print("[FAIL] audiosr isolated env bootstrap: {}".format(ex))
+        print("[FAIL] lavasr isolated env bootstrap: {}".format(ex))
         return False
 
     code = (
         "import warnings; warnings.filterwarnings('ignore');"
-        "from audiosr import build_model, super_resolution;"
+        "from LavaSR.model import LavaEnhance2;"
         "print('ok')"
     )
     try:
@@ -142,11 +142,11 @@ def check_audiosr_runner():
             stderr=subprocess.PIPE,
             text=True,
         )
-        print("[OK]   audiosr isolated env import compatibility")
+        print("[OK]   lavasr isolated env import compatibility")
         return True
     except subprocess.CalledProcessError as ex:
         err = "\n".join(part.strip() for part in ((ex.stdout or ""), (ex.stderr or "")) if part.strip())
-        print("[FAIL] audiosr isolated env import compatibility: {}".format(err or "unknown error"))
+        print("[FAIL] lavasr isolated env import compatibility: {}".format(err or "unknown error"))
         return False
 
 
@@ -160,7 +160,7 @@ def main():
         ok = check_module(import_name, label) and ok
 
     ok = check_deepfilternet_runner() and ok
-    ok = check_audiosr_runner() and ok
+    ok = check_lavasr_runner() and ok
 
     for binary in ("ffmpeg", "ffprobe"):
         ok = check_binary(binary) and ok
