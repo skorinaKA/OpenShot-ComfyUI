@@ -69,7 +69,7 @@ except Exception:
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
-AUDIOSR_ENV_VERSION = "5"
+AUDIOSR_ENV_VERSION = "6"
 GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-tiny",
     "IDEA-Research/grounding-dino-base",
@@ -1231,6 +1231,16 @@ def _ensure_audiosr_environment():
             "--upgrade",
             "--no-deps",
             "audiosr==0.0.7",
+        ],
+        "AudioSR core package install failed",
+    )
+    _run_checked(
+        [
+            python_path,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
             "numpy<=1.23.5",
             "librosa==0.9.2",
             "transformers==4.30.2",
@@ -1243,6 +1253,7 @@ def _ensure_audiosr_environment():
             "dlinfo",
             "segments",
             "csvw",
+            "language-tags",
             "ftfy",
             "einops",
             "pandas",
