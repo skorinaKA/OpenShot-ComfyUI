@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -7,6 +8,7 @@ import types
 import wave
 
 import numpy as np
+import torch
 
 
 def log(message):
@@ -60,12 +62,45 @@ def run_ffmpeg(args, error_prefix):
         raise RuntimeError("{}: {}".format(error_prefix, err))
 
 
+def probe_audio_info(path):
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=sample_rate,channels,channel_layout",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        data = json.loads(result.stdout or "{}")
+    except Exception:
+        return {}
+    streams = data.get("streams") or []
+    if not streams:
+        return {}
+    stream = streams[0] or {}
+    return {
+        "sample_rate": int(stream.get("sample_rate") or 0),
+        "channels": int(stream.get("channels") or 0),
+        "channel_layout": str(stream.get("channel_layout") or "").strip(),
+    }
+
+
 def decode_audio_to_wav(source_path, wav_path):
     run_ffmpeg(["-i", source_path, "-vn", "-acodec", "pcm_s16le", wav_path], "ffmpeg audio decode failed")
 
 
-def encode_audio_to_flac(source_path, flac_path):
-    run_ffmpeg(["-i", source_path, "-vn", "-c:a", "flac", flac_path], "ffmpeg FLAC encode failed")
+def encode_audio_to_flac(source_path, flac_path, channel_layout=None):
+    args = ["-i", source_path, "-vn"]
+    if str(channel_layout or "").strip():
+        args.extend(["-channel_layout", str(channel_layout).strip()])
+    args.extend(["-c:a", "flac", flac_path])
+    run_ffmpeg(args, "ffmpeg FLAC encode failed")
 
 
 def load_pcm16_wav(path):
@@ -110,6 +145,20 @@ def match_audio_length(audio, target_length):
     return F.pad(audio, (0, target_length - current))
 
 
+def enhance_channel(model, df_state, ta_functional, df_enhance, channel_audio, source_sr, amount):
+    model_sr = int(getattr(df_state, "sr", 48000)() if callable(getattr(df_state, "sr", None)) else getattr(df_state, "sr", 48000))
+    work_audio = channel_audio
+    if int(source_sr) != model_sr:
+        work_audio = ta_functional.resample(work_audio, int(source_sr), model_sr)
+    enhanced_audio = df_enhance(model, df_state, work_audio, pad=True)
+    enhanced_audio = (work_audio * (1.0 - amount)) + (enhanced_audio * amount)
+    enhanced_audio = torch.clamp(enhanced_audio, -1.0, 1.0)
+    if int(source_sr) != model_sr:
+        enhanced_audio = ta_functional.resample(enhanced_audio, model_sr, int(source_sr))
+    enhanced_audio = match_audio_length(enhanced_audio, int(channel_audio.shape[-1]))
+    return enhanced_audio
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -130,6 +179,7 @@ def main():
     output_path = os.path.abspath(args.output)
     amount = float(max(0.0, min(1.0, args.amount)))
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    source_info = probe_audio_info(input_path)
 
     tmp_dir = tempfile.mkdtemp(prefix="openshot_df_runner_")
     try:
@@ -144,7 +194,7 @@ def main():
         if amount <= 0.0:
             log("Noise reduction is 0.0, copying input audio to FLAC")
             save_pcm16_wav(enhanced_wav, source_audio.cpu().numpy(), int(source_sr))
-            encode_audio_to_flac(enhanced_wav, output_path)
+            encode_audio_to_flac(enhanced_wav, output_path, source_info.get("channel_layout"))
             return 0
 
         log("Loading DeepFilterNet3 model")
@@ -155,23 +205,18 @@ def main():
             default_model="DeepFilterNet3",
         )
 
-        model_sr = int(getattr(df_state, "sr", 48000)() if callable(getattr(df_state, "sr", None)) else getattr(df_state, "sr", 48000))
-        work_audio = source_audio
-        if int(source_sr) != model_sr:
-            work_audio = ta_functional.resample(work_audio, int(source_sr), model_sr)
-
-        log("Running DeepFilterNet enhancement")
-        enhanced_audio = df_enhance(model, df_state, work_audio, pad=True)
-        enhanced_audio = (work_audio * (1.0 - amount)) + (enhanced_audio * amount)
-        enhanced_audio = torch.clamp(enhanced_audio, -1.0, 1.0)
-
-        if int(source_sr) != model_sr:
-            enhanced_audio = ta_functional.resample(enhanced_audio, model_sr, int(source_sr))
-        enhanced_audio = match_audio_length(enhanced_audio, int(source_audio.shape[-1]))
+        log("Running DeepFilterNet enhancement channel-by-channel")
+        enhanced_channels = []
+        for channel_index in range(int(source_audio.shape[0])):
+            log("Enhancing channel {}/{}".format(channel_index + 1, int(source_audio.shape[0])))
+            channel_audio = source_audio[channel_index : channel_index + 1, :]
+            enhanced_channel = enhance_channel(model, df_state, ta_functional, df_enhance, channel_audio, source_sr, amount)
+            enhanced_channels.append(enhanced_channel)
+        enhanced_audio = torch.cat(enhanced_channels, dim=0)
 
         log("Encoding denoised audio to FLAC")
         save_pcm16_wav(enhanced_wav, enhanced_audio.cpu().numpy(), int(source_sr))
-        encode_audio_to_flac(enhanced_wav, output_path)
+        encode_audio_to_flac(enhanced_wav, output_path, source_info.get("channel_layout"))
         log("DeepFilterNet output ready: {}".format(output_path))
 
         if args.release_model:

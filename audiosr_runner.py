@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -25,12 +26,45 @@ def run_ffmpeg(args, error_prefix):
         raise RuntimeError("{}: {}".format(error_prefix, err))
 
 
+def probe_audio_info(path):
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=sample_rate,channels,channel_layout",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        data = json.loads(result.stdout or "{}")
+    except Exception:
+        return {}
+    streams = data.get("streams") or []
+    if not streams:
+        return {}
+    stream = streams[0] or {}
+    return {
+        "sample_rate": int(stream.get("sample_rate") or 0),
+        "channels": int(stream.get("channels") or 0),
+        "channel_layout": str(stream.get("channel_layout") or "").strip(),
+    }
+
+
 def decode_audio_to_wav(source_path, wav_path):
     run_ffmpeg(["-i", source_path, "-vn", "-acodec", "pcm_s16le", wav_path], "ffmpeg audio decode failed")
 
 
-def encode_audio_to_flac(source_path, flac_path):
-    run_ffmpeg(["-i", source_path, "-vn", "-c:a", "flac", flac_path], "ffmpeg FLAC encode failed")
+def encode_audio_to_flac(source_path, flac_path, channel_layout=None):
+    args = ["-i", source_path, "-vn"]
+    if str(channel_layout or "").strip():
+        args.extend(["-channel_layout", str(channel_layout).strip()])
+    args.extend(["-c:a", "flac", flac_path])
+    run_ffmpeg(args, "ffmpeg FLAC encode failed")
 
 
 def load_pcm16_wav(path):
@@ -59,6 +93,11 @@ def save_pcm16_wav(path, audio, sample_rate):
         wav_file.setsampwidth(2)
         wav_file.setframerate(int(sample_rate))
         wav_file.writeframes(pcm.tobytes())
+
+
+def save_mono_pcm16_wav(path, audio, sample_rate):
+    audio = np.asarray(audio, dtype=np.float32).reshape(1, -1)
+    save_pcm16_wav(path, audio, sample_rate)
 
 
 def patch_torchaudio_load():
@@ -109,6 +148,46 @@ def run_audiosr(build_model, super_resolution, source_wav, model_name, device_na
             pass
 
 
+def normalize_audiosr_output(waveform):
+    out_np = np.asarray(waveform, dtype=np.float32)
+    if out_np.ndim == 3:
+        out_np = out_np[0]
+    if out_np.ndim == 1:
+        out_np = out_np.reshape(1, -1)
+    return out_np
+
+
+def run_audiosr_with_model(model, super_resolution, source_wav, device_name):
+    log("Running AudioSR super resolution on {}".format(device_name))
+    return super_resolution(
+        model,
+        source_wav,
+        seed=42,
+        guidance_scale=3.5,
+        ddim_steps=50,
+        latent_t_per_second=12.8,
+    )
+
+
+def run_audiosr_channels(build_model, super_resolution, source_audio_np, source_sr, model_name, device_name, tmp_dir):
+    log("Loading AudioSR model '{}' on {}".format(model_name, device_name))
+    model = build_model(model_name=model_name, device=device_name)
+    try:
+        channel_outputs = []
+        for channel_index in range(int(source_audio_np.shape[0])):
+            log("Enhancing channel {}/{} on {}".format(channel_index + 1, int(source_audio_np.shape[0]), device_name))
+            channel_path = os.path.join(tmp_dir, "channel_{}.wav".format(channel_index))
+            save_mono_pcm16_wav(channel_path, source_audio_np[channel_index], int(source_sr))
+            waveform = run_audiosr_with_model(model, super_resolution, channel_path, device_name)
+            channel_outputs.append(normalize_audiosr_output(waveform)[0])
+        return np.stack(channel_outputs, axis=0)
+    finally:
+        try:
+            model.cpu()
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -122,6 +201,7 @@ def main():
     input_path = os.path.abspath(args.input)
     output_path = os.path.abspath(args.output)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    source_info = probe_audio_info(input_path)
 
     tmp_dir = tempfile.mkdtemp(prefix="openshot_audiosr_")
     try:
@@ -129,6 +209,7 @@ def main():
         enhanced_wav = os.path.join(tmp_dir, "enhanced.wav")
         log("Decoding input audio with ffmpeg")
         decode_audio_to_wav(input_path, source_wav)
+        source_audio_np, source_sr = load_pcm16_wav(source_wav)
 
         patch_torchaudio_load()
         log("Importing AudioSR")
@@ -138,7 +219,7 @@ def main():
 
         waveform = None
         try:
-            waveform = run_audiosr(build_model, super_resolution, source_wav, args.model_name, "auto")
+            waveform = run_audiosr_channels(build_model, super_resolution, source_audio_np, source_sr, args.model_name, "auto", tmp_dir)
         except Exception as ex:
             if not is_cuda_oom(ex):
                 raise
@@ -148,16 +229,12 @@ def main():
                     torch.cuda.empty_cache()
             except Exception:
                 pass
-            waveform = run_audiosr(build_model, super_resolution, source_wav, args.model_name, "cpu")
+            waveform = run_audiosr_channels(build_model, super_resolution, source_audio_np, source_sr, args.model_name, "cpu", tmp_dir)
 
-        out_np = np.asarray(waveform, dtype=np.float32)
-        if out_np.ndim == 3:
-            out_np = out_np[0]
-        if out_np.ndim == 1:
-            out_np = out_np.reshape(1, -1)
+        out_np = normalize_audiosr_output(waveform)
         log("Encoding enhanced audio to FLAC")
         save_pcm16_wav(enhanced_wav, out_np, 48000)
-        encode_audio_to_flac(enhanced_wav, output_path)
+        encode_audio_to_flac(enhanced_wav, output_path, source_info.get("channel_layout"))
         log("AudioSR output ready: {}".format(output_path))
         return 0
     finally:
