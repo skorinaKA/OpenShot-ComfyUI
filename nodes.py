@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 import tempfile
+import wave
 from contextlib import nullcontext
 from urllib.parse import urlparse
 from fractions import Fraction
@@ -1115,6 +1116,32 @@ def _encode_audio_to_flac(source_path, flac_path):
         ["-i", source_path, "-vn", "-c:a", "flac", flac_path],
         "ffmpeg FLAC encode failed",
     )
+
+
+def _save_comfy_audio_to_wav(audio, wav_path):
+    if not isinstance(audio, dict):
+        raise ValueError("Invalid AUDIO input")
+    waveform = audio.get("waveform")
+    sample_rate = int(audio.get("sample_rate", 0) or 0)
+    if waveform is None or sample_rate <= 0:
+        raise ValueError("AUDIO input missing waveform or sample_rate")
+
+    tensor = waveform.detach().cpu()
+    if tensor.ndim != 3:
+        raise ValueError("Expected AUDIO waveform with shape [batch, channels, samples]")
+    if int(tensor.shape[0]) <= 0:
+        raise ValueError("AUDIO waveform batch is empty")
+    tensor = tensor[0]
+    if tensor.ndim != 2:
+        raise ValueError("Expected AUDIO waveform channels dimension")
+
+    audio_np = np.clip(tensor.numpy(), -1.0, 1.0)
+    pcm = np.round(audio_np * 32767.0).astype("<i2").T
+    with wave.open(wav_path, "wb") as wav_file:
+        wav_file.setnchannels(int(audio_np.shape[0]))
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm.tobytes())
 
 
 def _deepfilternet_runner_path():
@@ -2806,6 +2833,9 @@ class OpenShotDeepFilterNetDenoiseAudio:
                 "noise_reduction": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "keep_model_loaded": ("BOOLEAN", {"default": True}),
             },
+            "optional": {
+                "audio": ("AUDIO",),
+            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -2834,13 +2864,21 @@ class OpenShotDeepFilterNetDenoiseAudio:
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
         return os.path.join(output_dir, "{}_denoised_{}.flac".format(stem, digest))
 
-    def denoise(self, source_audio_path, noise_reduction, keep_model_loaded):
+    def denoise(self, source_audio_path, noise_reduction, keep_model_loaded, audio=None):
         _require_deepfilternet()
 
-        source_path = self._resolve_source_path(source_audio_path)
+        temp_source_dir = None
+        if audio is not None:
+            temp_source_dir = tempfile.mkdtemp(prefix="openshot_audio_input_", dir=folder_paths.get_temp_directory())
+            source_path = os.path.join(temp_source_dir, "input.wav")
+            _save_comfy_audio_to_wav(audio, source_path)
+        else:
+            source_path = self._resolve_source_path(source_audio_path)
         noise_reduction = float(max(0.0, min(1.0, float(noise_reduction))))
         output_path = self._build_output_path(source_path, noise_reduction)
         if os.path.isfile(output_path):
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
             return (output_path,)
 
         runner = _deepfilternet_runner_path()
@@ -2867,6 +2905,9 @@ class OpenShotDeepFilterNetDenoiseAudio:
             if len(err) > 1000:
                 err = err[:1000] + "...(truncated)"
             raise RuntimeError("DeepFilterNet denoise failed: {}".format(err))
+        finally:
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
 
         if not os.path.isfile(output_path):
             raise RuntimeError("DeepFilterNet denoise did not produce output: {}".format(output_path))
