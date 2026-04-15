@@ -115,8 +115,39 @@ def check_audiosr_runner():
     if not os.path.isfile(runner):
         print("[FAIL] audiosr runner missing: {}".format(runner))
         return False
-    print("[OK]   audiosr runner present (isolated environment bootstraps on first use)")
-    return True
+    if not module_available("torch") or not module_available("torchaudio") or not module_available("torchvision"):
+        print("[OK]   audiosr runner present (skipping isolated env probe; main torch/torchaudio/torchvision not available)")
+        return True
+    try:
+        nodes = importlib.import_module("nodes")
+        ensure_env = getattr(nodes, "_ensure_audiosr_environment", None)
+        if not callable(ensure_env):
+            print("[FAIL] audiosr bootstrap helper missing from nodes.py")
+            return False
+        python_path = ensure_env()
+    except Exception as ex:
+        print("[FAIL] audiosr isolated env bootstrap: {}".format(ex))
+        return False
+
+    code = (
+        "import warnings; warnings.filterwarnings('ignore');"
+        "from audiosr import build_model, super_resolution;"
+        "print('ok')"
+    )
+    try:
+        subprocess.run(
+            [python_path, "-c", code],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        print("[OK]   audiosr isolated env import compatibility")
+        return True
+    except subprocess.CalledProcessError as ex:
+        err = "\n".join(part.strip() for part in ((ex.stdout or ""), (ex.stderr or "")) if part.strip())
+        print("[FAIL] audiosr isolated env import compatibility: {}".format(err or "unknown error"))
+        return False
 
 
 def main():
