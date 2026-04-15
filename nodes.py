@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 import tempfile
+import venv
 import wave
 from contextlib import nullcontext
 from urllib.parse import urlparse
@@ -59,6 +60,11 @@ except Exception as ex:  # pragma: no cover - runtime env specific
     _deepfilternet_import_error = ex
 else:
     _deepfilternet_import_error = None
+
+try:
+    import torchvision
+except Exception:
+    torchvision = None
 
 
 SAM2_MODEL_DIR = "sam2"
@@ -133,6 +139,13 @@ def _require_deepfilternet():
                 _deepfilternet_import_error
             )
         )
+
+
+def _require_audiosr_bootstrap():
+    if torchaudio is None:
+        raise RuntimeError("AudioSR bootstrap requires torchaudio in the main Comfy environment")
+    if torchvision is None:
+        raise RuntimeError("AudioSR bootstrap requires torchvision in the main Comfy environment")
 
 
 def _model_storage_dir():
@@ -1146,6 +1159,90 @@ def _save_comfy_audio_to_wav(audio, wav_path):
 
 def _deepfilternet_runner_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepfilternet_runner.py")
+
+
+def _audiosr_env_dir():
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".openshot_envs")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "audiosr")
+
+
+def _audiosr_python_path():
+    env_dir = _audiosr_env_dir()
+    if os.name == "nt":
+        return os.path.join(env_dir, "Scripts", "python.exe")
+    return os.path.join(env_dir, "bin", "python")
+
+
+def _audiosr_runner_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiosr_runner.py")
+
+
+def _run_checked(cmd, error_prefix):
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as ex:
+        err = (ex.stderr or "").strip()
+        if len(err) > 1200:
+            err = err[:1200] + "...(truncated)"
+        raise RuntimeError("{}: {}".format(error_prefix, err))
+
+
+def _ensure_audiosr_environment():
+    _require_audiosr_bootstrap()
+
+    env_dir = _audiosr_env_dir()
+    python_path = _audiosr_python_path()
+    marker_path = os.path.join(env_dir, ".ready")
+    runner_path = _audiosr_runner_path()
+
+    if os.path.isfile(marker_path) and os.path.isfile(python_path):
+        return python_path
+
+    builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
+    if not os.path.isdir(env_dir):
+        builder.create(env_dir)
+    elif not os.path.isfile(python_path):
+        builder.create(env_dir)
+
+    _run_checked([python_path, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], "AudioSR pip bootstrap failed")
+    _run_checked(
+        [
+            python_path,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--no-deps",
+            "audiosr==0.0.7",
+            "numpy<=1.23.5",
+            "librosa==0.9.2",
+            "transformers==4.30.2",
+            "soundfile",
+            "phonemizer",
+            "torchlibrosa>=0.0.9",
+            "tqdm",
+            "progressbar",
+            "ftfy",
+            "einops",
+            "pandas",
+            "unidecode",
+            "chardet",
+            "pyyaml",
+            "gradio",
+            "huggingface-hub",
+            "scipy",
+            "timm",
+        ],
+        "AudioSR dependency install failed",
+    )
+
+    with open(marker_path, "w", encoding="utf-8") as handle:
+        handle.write("ok\n")
+        handle.write("{}\n".format(time.time()))
+    if not os.path.isfile(runner_path):
+        raise RuntimeError("AudioSR runner script not found: {}".format(runner_path))
+    return python_path
 
 
 class OpenShotSceneRangesFromSegments:
@@ -2914,6 +3011,94 @@ class OpenShotDeepFilterNetDenoiseAudio:
         return (output_path,)
 
 
+class OpenShotAudioSRClarity:
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return ""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_audio_path": ("STRING", {"default": ""}),
+                "model_name": (["speech", "basic"], {"default": "speech"}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("clarified_audio_path",)
+    FUNCTION = "enhance"
+    CATEGORY = "OpenShot/Audio"
+
+    def _resolve_source_path(self, source_audio_path):
+        source_path = _resolve_local_media_path(source_audio_path)
+        source_path = str(source_path or "").strip()
+        if not source_path or not os.path.isfile(source_path):
+            raise ValueError("Audio path not found: {}".format(source_audio_path))
+        return source_path
+
+    def _build_output_path(self, source_path, model_name):
+        output_dir = os.path.join(_safe_output_directory(), "openshot_audio")
+        os.makedirs(output_dir, exist_ok=True)
+        stem = _sanitize_filename_part(os.path.splitext(os.path.basename(source_path))[0], default="audio")
+        stat = os.stat(source_path)
+        key = "{}|{}|{}|{}".format(
+            source_path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            str(model_name or "basic"),
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+        return os.path.join(output_dir, "{}_clarity_{}_{}.flac".format(stem, str(model_name), digest))
+
+    def enhance(self, source_audio_path, model_name, keep_model_loaded, audio=None):
+        temp_source_dir = None
+        if audio is not None:
+            temp_source_dir = tempfile.mkdtemp(prefix="openshot_audio_input_", dir=folder_paths.get_temp_directory())
+            source_path = os.path.join(temp_source_dir, "input.wav")
+            _save_comfy_audio_to_wav(audio, source_path)
+        else:
+            source_path = self._resolve_source_path(source_audio_path)
+
+        output_path = self._build_output_path(source_path, model_name)
+        if os.path.isfile(output_path):
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
+            return (output_path,)
+
+        runner = _audiosr_runner_path()
+        if not os.path.isfile(runner):
+            raise RuntimeError("AudioSR runner script not found: {}".format(runner))
+        python_path = _ensure_audiosr_environment()
+
+        cmd = [
+            python_path,
+            runner,
+            "--input",
+            source_path,
+            "--output",
+            output_path,
+            "--model-name",
+            str(model_name or "basic"),
+        ]
+        if not bool(keep_model_loaded):
+            cmd.append("--release-model")
+
+        try:
+            _run_checked(cmd, "AudioSR enhancement failed")
+        finally:
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
+
+        if not os.path.isfile(output_path):
+            raise RuntimeError("AudioSR enhancement did not produce output: {}".format(output_path))
+        return (output_path,)
+
+
 class OpenShotGroundingDinoDetect:
     _model_cache = {}
 
@@ -3070,6 +3255,7 @@ NODE_CLASS_MAPPINGS = {
     "OpenShotImageBlurMasked": OpenShotImageBlurMasked,
     "OpenShotImageHighlightMasked": OpenShotImageHighlightMasked,
     "OpenShotDeepFilterNetDenoiseAudio": OpenShotDeepFilterNetDenoiseAudio,
+    "OpenShotAudioSRClarity": OpenShotAudioSRClarity,
     "OpenShotGroundingDinoDetect": OpenShotGroundingDinoDetect,
     "OpenShotSceneRangesFromSegments": OpenShotSceneRangesFromSegments,
 }
@@ -3083,6 +3269,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenShotImageBlurMasked": "OpenShot Blur Masked (Skip Empty)",
     "OpenShotImageHighlightMasked": "OpenShot Highlight Masked",
     "OpenShotDeepFilterNetDenoiseAudio": "OpenShot DeepFilterNet Audio Denoise",
+    "OpenShotAudioSRClarity": "OpenShot AudioSR Clarity",
     "OpenShotGroundingDinoDetect": "OpenShot GroundingDINO Detect",
     "OpenShotSceneRangesFromSegments": "OpenShot Scene Ranges From Segments",
 }

@@ -28,6 +28,7 @@ This project addresses that gap with chunk-oriented processing designed specific
 - `OpenShotGroundingDinoDetect` (text-prompted object detection -> mask + JSON)
 - `OpenShotTransNetSceneDetect` (direct TransNetV2 inference -> IN/OUT JSON ranges)
 - `OpenShotDeepFilterNetDenoiseAudio` (file-path based audio denoise -> FLAC path)
+- `OpenShotAudioSRClarity` (isolated AudioSR runner -> FLAC path)
 
 ## Attribution
 
@@ -82,6 +83,7 @@ SAM2 is installed separately on purpose. Keeping it out of `requirements.txt` ma
 - `OpenShotDownloadAndLoadSAM2Model` downloads supported SAM2 checkpoints into `ComfyUI/models/sam2` on first use.
 - `OpenShotGroundingDinoDetect` downloads model weights from Hugging Face on first use and uses the normal HF cache.
 - `OpenShotDeepFilterNetDenoiseAudio` downloads the default `DeepFilterNet3` model on first use using DeepFilterNet's cache directory.
+- `OpenShotAudioSRClarity` creates an isolated local venv on first use, installs AudioSR there, and then downloads the selected AudioSR checkpoint from Hugging Face on first run.
 - `OpenShotTransNetSceneDetect` does not require a separate manual weight download from this node pack.
 
 ## Audio denoise node
@@ -95,6 +97,18 @@ SAM2 is installed separately on purpose. Keeping it out of `requirements.txt` ma
 - `1.0` means "full denoise"
 
 The node accepts typical audio formats that `ffmpeg` can decode and always writes a new `.flac` file into ComfyUI's output folder under `openshot_audio/`.
+
+## Audio clarity node
+
+`OpenShotAudioSRClarity` is intended for low-fidelity or bandwidth-limited audio:
+
+- Input: `source_audio_path` or `audio`, `model_name`, `keep_model_loaded`
+- Output: a new FLAC file path
+- `model_name=speech` is intended for spoken voice
+- `model_name=basic` is intended for music and sound effects
+
+AudioSR is intentionally not installed into the main Comfy environment because its package pins older `numpy`, `librosa`, and `transformers` versions. Instead, the node creates and uses an isolated runner environment on first use so the main Comfy environment stays stable.
+That means there is no extra install command for AudioSR, but the first `Clarity` run will take longer while the isolated environment and model checkpoint are prepared.
 
 ## Validation script
 
@@ -117,6 +131,7 @@ It checks:
 - `OpenShotSam2VideoSegmentationChunked` returns only the requested chunk range (bounded memory) instead of collecting whole-video masks.
 - For very long videos, pair chunked outputs with batch-safe downstream nodes (VHS meta-batch, staged processing, or on-disk intermediates).
 - `torchaudio` is listed explicitly because DeepFilterNet imports it internally and some environments do not pull it in automatically.
+- AudioSR uses a separate on-demand runner environment to avoid downgrading shared Comfy dependencies.
 
 ---
 

@@ -32,6 +32,7 @@ EXPECTED_NODES = [
     "OpenShotImageBlurMasked",
     "OpenShotImageHighlightMasked",
     "OpenShotDeepFilterNetDenoiseAudio",
+    "OpenShotAudioSRClarity",
     "OpenShotGroundingDinoDetect",
     "OpenShotSceneRangesFromSegments",
 ]
@@ -109,6 +110,15 @@ def check_deepfilternet_runner():
         return False
 
 
+def check_audiosr_runner():
+    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiosr_runner.py")
+    if not os.path.isfile(runner):
+        print("[FAIL] audiosr runner missing: {}".format(runner))
+        return False
+    print("[OK]   audiosr runner present (isolated environment bootstraps on first use)")
+    return True
+
+
 def main():
     ok = True
 
@@ -119,6 +129,7 @@ def main():
         ok = check_module(import_name, label) and ok
 
     ok = check_deepfilternet_runner() and ok
+    ok = check_audiosr_runner() and ok
 
     for binary in ("ffmpeg", "ffprobe"):
         ok = check_binary(binary) and ok
