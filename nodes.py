@@ -50,6 +50,20 @@ except Exception as ex:  # pragma: no cover - runtime env specific
 else:
     _transnet_import_error = None
 
+try:
+    from df.enhance import enhance as _df_enhance
+    from df.enhance import init_df as _df_init_df
+    import torchaudio
+    import torchaudio.functional as ta_functional
+except Exception as ex:  # pragma: no cover - runtime env specific
+    _df_enhance = None
+    _df_init_df = None
+    torchaudio = None
+    ta_functional = None
+    _deepfilternet_import_error = ex
+else:
+    _deepfilternet_import_error = None
+
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
@@ -58,6 +72,9 @@ GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-base",
 )
 GROUNDING_DINO_CACHE = {}
+DEEPFILTERNET_CACHE = {}
+
+
 def _sam2_debug_enabled():
     # Temporary: always-on debug while we diagnose chunk/carry drift.
     return True
@@ -112,6 +129,15 @@ def _require_transnet():
         raise RuntimeError(
             "TransNetV2 imports failed. Install `transnetv2-pytorch` and restart ComfyUI. Error: {}".format(
                 _transnet_import_error
+            )
+        )
+
+
+def _require_deepfilternet():
+    if _df_enhance is None or _df_init_df is None or torchaudio is None or ta_functional is None:
+        raise RuntimeError(
+            "DeepFilterNet imports failed. Install requirements and restart ComfyUI. Error: {}".format(
+                _deepfilternet_import_error
             )
         )
 
@@ -1008,6 +1034,114 @@ def _probe_video_info(path_text):
         "fps": fps,
         "duration": duration,
     }
+
+
+def _safe_output_directory():
+    try:
+        path = folder_paths.get_output_directory()
+    except Exception:
+        path = os.path.join(folder_paths.get_temp_directory(), "openshot_outputs")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _sanitize_filename_part(text, default="file"):
+    text = str(text or "").strip()
+    if not text:
+        return default
+    allowed = []
+    for ch in text:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            allowed.append(ch)
+        else:
+            allowed.append("_")
+    cleaned = "".join(allowed).strip("._")
+    return cleaned or default
+
+
+def _run_ffmpeg_audio(args, error_prefix):
+    cmd = ["ffmpeg", "-y"] + list(args)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg not found; required for audio processing")
+    except subprocess.CalledProcessError as ex:
+        err = (ex.stderr or "").strip()
+        if len(err) > 500:
+            err = err[:500] + "...(truncated)"
+        raise RuntimeError("{}: {}".format(error_prefix, err))
+
+
+def _decode_audio_to_wav(source_path, wav_path):
+    _run_ffmpeg_audio(
+        ["-i", source_path, "-vn", "-acodec", "pcm_s16le", wav_path],
+        "ffmpeg audio decode failed",
+    )
+
+
+def _encode_audio_to_flac(source_path, flac_path):
+    _run_ffmpeg_audio(
+        ["-i", source_path, "-vn", "-c:a", "flac", flac_path],
+        "ffmpeg FLAC encode failed",
+    )
+
+
+def _match_audio_length(audio, target_length):
+    target_length = int(max(0, target_length))
+    if audio is None:
+        return audio
+    current = int(audio.shape[-1])
+    if current == target_length:
+        return audio
+    if current > target_length:
+        return audio[..., :target_length]
+    pad = target_length - current
+    return F.pad(audio, (0, pad))
+
+
+def _deepfilternet_sample_rate(df_state, default=48000):
+    sr_attr = getattr(df_state, "sr", None)
+    try:
+        if callable(sr_attr):
+            return int(sr_attr())
+        if sr_attr is not None:
+            return int(sr_attr)
+    except Exception:
+        pass
+    return int(default)
+
+
+def _get_deepfilternet_bundle():
+    key = "DeepFilterNet3"
+    cached = DEEPFILTERNET_CACHE.get(key)
+    if cached is not None:
+        return cached
+    model, df_state, suffix = _df_init_df(
+        model_base_dir=None,
+        log_file=None,
+        config_allow_defaults=True,
+        default_model=key,
+    )
+    cached = {
+        "model": model,
+        "df_state": df_state,
+        "suffix": suffix,
+        "sample_rate": _deepfilternet_sample_rate(df_state),
+    }
+    DEEPFILTERNET_CACHE[key] = cached
+    return cached
+
+
+def _release_deepfilternet_bundle():
+    for bundle in list(DEEPFILTERNET_CACHE.values()):
+        model = bundle.get("model") if isinstance(bundle, dict) else None
+        if model is not None:
+            try:
+                model.cpu()
+            except Exception:
+                pass
+    DEEPFILTERNET_CACHE.clear()
+    mm.soft_empty_cache()
 
 
 class OpenShotSceneRangesFromSegments:
@@ -2682,6 +2816,96 @@ class OpenShotImageHighlightMasked:
         return (out.to(mm.intermediate_device()),)
 
 
+class OpenShotDeepFilterNetDenoiseAudio:
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return ""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_audio_path": ("STRING", {"default": ""}),
+                "noise_reduction": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("denoised_audio_path",)
+    FUNCTION = "denoise"
+    CATEGORY = "OpenShot/Audio"
+
+    def _resolve_source_path(self, source_audio_path):
+        source_path = _resolve_video_path_for_sam2(source_audio_path)
+        source_path = str(source_path or "").strip()
+        if not source_path or not os.path.isfile(source_path):
+            raise ValueError("Audio path not found: {}".format(source_audio_path))
+        return source_path
+
+    def _build_output_path(self, source_path, noise_reduction):
+        output_dir = os.path.join(_safe_output_directory(), "openshot_audio")
+        os.makedirs(output_dir, exist_ok=True)
+        stem = _sanitize_filename_part(os.path.splitext(os.path.basename(source_path))[0], default="audio")
+        stat = os.stat(source_path)
+        key = "{}|{}|{}|{:.4f}".format(
+            source_path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            float(noise_reduction),
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+        return os.path.join(output_dir, "{}_denoised_{}.flac".format(stem, digest))
+
+    def denoise(self, source_audio_path, noise_reduction, keep_model_loaded):
+        _require_deepfilternet()
+
+        source_path = self._resolve_source_path(source_audio_path)
+        noise_reduction = float(max(0.0, min(1.0, float(noise_reduction))))
+        output_path = self._build_output_path(source_path, noise_reduction)
+        if os.path.isfile(output_path):
+            return (output_path,)
+
+        tmp_dir = tempfile.mkdtemp(prefix="openshot_df_audio_", dir=folder_paths.get_temp_directory())
+        try:
+            source_wav = os.path.join(tmp_dir, "source.wav")
+            enhanced_wav = os.path.join(tmp_dir, "enhanced.wav")
+            _decode_audio_to_wav(source_path, source_wav)
+
+            source_audio, source_sr = torchaudio.load(source_wav)
+            source_audio = source_audio.to(torch.float32)
+
+            if noise_reduction <= 0.0:
+                torchaudio.save(enhanced_wav, source_audio.cpu(), int(source_sr))
+                _encode_audio_to_flac(enhanced_wav, output_path)
+                return (output_path,)
+
+            bundle = _get_deepfilternet_bundle()
+            model = bundle["model"]
+            df_state = bundle["df_state"]
+            model_sr = int(bundle["sample_rate"])
+
+            work_audio = source_audio
+            if int(source_sr) != model_sr:
+                work_audio = ta_functional.resample(work_audio, int(source_sr), model_sr)
+
+            enhanced_audio = _df_enhance(model, df_state, work_audio, pad=True)
+            enhanced_audio = (work_audio * (1.0 - noise_reduction)) + (enhanced_audio * noise_reduction)
+            enhanced_audio = torch.clamp(enhanced_audio, -1.0, 1.0)
+
+            if int(source_sr) != model_sr:
+                enhanced_audio = ta_functional.resample(enhanced_audio, model_sr, int(source_sr))
+            enhanced_audio = _match_audio_length(enhanced_audio, int(source_audio.shape[-1]))
+
+            torchaudio.save(enhanced_wav, enhanced_audio.cpu(), int(source_sr))
+            _encode_audio_to_flac(enhanced_wav, output_path)
+            return (output_path,)
+        finally:
+            if not keep_model_loaded:
+                _release_deepfilternet_bundle()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 class OpenShotGroundingDinoDetect:
     _model_cache = {}
 
@@ -2837,6 +3061,7 @@ NODE_CLASS_MAPPINGS = {
     "OpenShotSam2VideoSegmentationChunked": OpenShotSam2VideoSegmentationChunked,
     "OpenShotImageBlurMasked": OpenShotImageBlurMasked,
     "OpenShotImageHighlightMasked": OpenShotImageHighlightMasked,
+    "OpenShotDeepFilterNetDenoiseAudio": OpenShotDeepFilterNetDenoiseAudio,
     "OpenShotGroundingDinoDetect": OpenShotGroundingDinoDetect,
     "OpenShotSceneRangesFromSegments": OpenShotSceneRangesFromSegments,
 }
@@ -2849,6 +3074,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenShotSam2VideoSegmentationChunked": "OpenShot SAM2 Video Segmentation (Chunked)",
     "OpenShotImageBlurMasked": "OpenShot Blur Masked (Skip Empty)",
     "OpenShotImageHighlightMasked": "OpenShot Highlight Masked",
+    "OpenShotDeepFilterNetDenoiseAudio": "OpenShot DeepFilterNet Audio Denoise",
     "OpenShotGroundingDinoDetect": "OpenShot GroundingDINO Detect",
     "OpenShotSceneRangesFromSegments": "OpenShot Scene Ranges From Segments",
 }
