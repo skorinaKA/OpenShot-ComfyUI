@@ -54,6 +54,12 @@ Install this node pack's Python dependencies:
 python -m pip install -r requirements.txt
 ```
 
+Install SAM2 separately:
+
+```bash
+python -m pip install --no-build-isolation git+https://github.com/facebookresearch/sam2.git
+```
+
 Validate the environment:
 
 ```bash
@@ -68,6 +74,8 @@ Restart ComfyUI after install.
 - Inside the actual ComfyUI Python environment, it also validates Comfy imports and node registration
 
 If you run it in the ComfyUI environment and it passes, restart ComfyUI and the nodes should load.
+
+SAM2 is installed separately on purpose. Keeping it out of `requirements.txt` makes the normal dependency install much more reliable and avoids long hangs during pip's build-isolation step.
 
 ## First-use model downloads
 
