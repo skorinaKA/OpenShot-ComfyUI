@@ -3,8 +3,10 @@ import os
 import hashlib
 import subprocess
 import shutil
+import sys
 import time
 import tempfile
+import types
 from contextlib import nullcontext
 from urllib.parse import urlparse
 from fractions import Fraction
@@ -51,10 +53,20 @@ else:
     _transnet_import_error = None
 
 try:
-    from df.enhance import enhance as _df_enhance
-    from df.enhance import init_df as _df_init_df
     import torchaudio
     import torchaudio.functional as ta_functional
+    if "torchaudio.backend.common" not in sys.modules:
+        compat_common = None
+        try:
+            from torchaudio._backend.common import AudioMetaData as _CompatAudioMetaData
+        except Exception:
+            _CompatAudioMetaData = getattr(torchaudio, "AudioMetaData", None)
+        if _CompatAudioMetaData is not None:
+            compat_common = types.ModuleType("torchaudio.backend.common")
+            compat_common.AudioMetaData = _CompatAudioMetaData
+            sys.modules["torchaudio.backend.common"] = compat_common
+    from df.enhance import enhance as _df_enhance
+    from df.enhance import init_df as _df_init_df
 except Exception as ex:  # pragma: no cover - runtime env specific
     _df_enhance = None
     _df_init_df = None

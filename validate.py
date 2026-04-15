@@ -1,6 +1,7 @@
 import importlib
 import shutil
 import sys
+import types
 
 
 BASE_REQUIRED_MODULES = [
@@ -38,6 +39,8 @@ EXPECTED_NODES = [
 
 def check_module(import_name, label):
     try:
+        if import_name == "df":
+            ensure_deepfilternet_torchaudio_compat()
         importlib.import_module(import_name)
         print("[OK]   import {} ({})".format(import_name, label))
         return True
@@ -76,6 +79,26 @@ def module_available(import_name):
         return True
     except Exception:
         return False
+
+
+def ensure_deepfilternet_torchaudio_compat():
+    try:
+        torchaudio = importlib.import_module("torchaudio")
+    except Exception:
+        return
+    if "torchaudio.backend.common" in sys.modules:
+        return
+    compat_audio_meta = None
+    try:
+        backend_common = importlib.import_module("torchaudio._backend.common")
+        compat_audio_meta = getattr(backend_common, "AudioMetaData", None)
+    except Exception:
+        compat_audio_meta = getattr(torchaudio, "AudioMetaData", None)
+    if compat_audio_meta is None:
+        return
+    module = types.ModuleType("torchaudio.backend.common")
+    module.AudioMetaData = compat_audio_meta
+    sys.modules["torchaudio.backend.common"] = module
 
 
 def main():
