@@ -3018,7 +3018,7 @@ class OpenShotAudioSRClarity:
             cmd.append("--release-model")
 
         try:
-            _run_checked(cmd, "AudioSR enhancement failed")
+            run_checked(cmd, "AudioSR enhancement failed")
         finally:
             if temp_source_dir:
                 shutil.rmtree(temp_source_dir, ignore_errors=True)
