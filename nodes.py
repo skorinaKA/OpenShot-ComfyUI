@@ -695,6 +695,45 @@ def _resolve_video_path_for_sam2(path_text):
     return path_text
 
 
+def _resolve_local_media_path(path_text):
+    path_text = str(path_text or "").strip()
+    if not path_text:
+        return ""
+
+    if path_text.endswith("]") and " [" in path_text:
+        path_text = path_text.rsplit(" [", 1)[0].strip()
+
+    if os.path.isabs(path_text) and os.path.exists(path_text):
+        return path_text
+
+    try:
+        resolved = folder_paths.get_annotated_filepath(path_text)
+        if resolved and os.path.exists(resolved):
+            return resolved
+    except Exception:
+        pass
+
+    for getter in (
+        getattr(folder_paths, "get_input_directory", None),
+        getattr(folder_paths, "get_output_directory", None),
+        getattr(folder_paths, "get_temp_directory", None),
+    ):
+        if not callable(getter):
+            continue
+        try:
+            root = getter()
+        except Exception:
+            continue
+        for candidate in (
+            os.path.join(root, path_text),
+            os.path.join(root, os.path.basename(path_text)),
+        ):
+            if os.path.exists(candidate):
+                return candidate
+
+    return path_text
+
+
 def _ensure_mp4_for_sam2(video_path):
     """Convert non-MP4 input videos to MP4 for SAM2VideoPredictor compatibility."""
     video_path = str(video_path or "").strip()
@@ -2775,7 +2814,7 @@ class OpenShotDeepFilterNetDenoiseAudio:
     CATEGORY = "OpenShot/Audio"
 
     def _resolve_source_path(self, source_audio_path):
-        source_path = _resolve_video_path_for_sam2(source_audio_path)
+        source_path = _resolve_local_media_path(source_audio_path)
         source_path = str(source_path or "").strip()
         if not source_path or not os.path.isfile(source_path):
             raise ValueError("Audio path not found: {}".format(source_audio_path))
