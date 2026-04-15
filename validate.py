@@ -3,7 +3,10 @@ import os
 import shutil
 import subprocess
 import sys
-from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment
+try:
+    from .audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment
+except Exception:
+    from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment
 
 
 BASE_REQUIRED_MODULES = [

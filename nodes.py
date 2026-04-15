@@ -17,7 +17,10 @@ import torch
 import torch.nn.functional as F
 from torch.hub import download_url_to_file
 from PIL import Image
-from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment, run_checked
+try:
+    from .audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment, run_checked
+except Exception:
+    from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment, run_checked
 
 import comfy.model_management as mm
 from comfy.utils import ProgressBar, common_upscale
