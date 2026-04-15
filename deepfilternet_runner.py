@@ -9,6 +9,10 @@ import wave
 import numpy as np
 
 
+def log(message):
+    print("[OpenShot-ComfyUI:DeepFilterNet] {}".format(message), flush=True)
+
+
 def ensure_torchaudio_backend_compat():
     import torchaudio
 
@@ -131,16 +135,19 @@ def main():
     try:
         source_wav = os.path.join(tmp_dir, "source.wav")
         enhanced_wav = os.path.join(tmp_dir, "enhanced.wav")
+        log("Decoding input audio with ffmpeg")
         decode_audio_to_wav(input_path, source_wav)
 
         source_audio_np, source_sr = load_pcm16_wav(source_wav)
         source_audio = torch.from_numpy(source_audio_np).to(torch.float32)
 
         if amount <= 0.0:
+            log("Noise reduction is 0.0, copying input audio to FLAC")
             save_pcm16_wav(enhanced_wav, source_audio.cpu().numpy(), int(source_sr))
             encode_audio_to_flac(enhanced_wav, output_path)
             return 0
 
+        log("Loading DeepFilterNet3 model")
         model, df_state, _suffix = df_init_df(
             model_base_dir=None,
             log_file=None,
@@ -153,6 +160,7 @@ def main():
         if int(source_sr) != model_sr:
             work_audio = ta_functional.resample(work_audio, int(source_sr), model_sr)
 
+        log("Running DeepFilterNet enhancement")
         enhanced_audio = df_enhance(model, df_state, work_audio, pad=True)
         enhanced_audio = (work_audio * (1.0 - amount)) + (enhanced_audio * amount)
         enhanced_audio = torch.clamp(enhanced_audio, -1.0, 1.0)
@@ -161,8 +169,10 @@ def main():
             enhanced_audio = ta_functional.resample(enhanced_audio, model_sr, int(source_sr))
         enhanced_audio = match_audio_length(enhanced_audio, int(source_audio.shape[-1]))
 
+        log("Encoding denoised audio to FLAC")
         save_pcm16_wav(enhanced_wav, enhanced_audio.cpu().numpy(), int(source_sr))
         encode_audio_to_flac(enhanced_wav, output_path)
+        log("DeepFilterNet output ready: {}".format(output_path))
 
         if args.release_model:
             try:

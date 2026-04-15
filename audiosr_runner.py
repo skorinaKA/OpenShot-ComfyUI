@@ -8,6 +8,10 @@ import wave
 import numpy as np
 
 
+def log(message):
+    print("[OpenShot-ComfyUI:AudioSR] {}".format(message), flush=True)
+
+
 def run_ffmpeg(args, error_prefix):
     cmd = ["ffmpeg", "-y"] + list(args)
     try:
@@ -97,15 +101,19 @@ def main():
     try:
         source_wav = os.path.join(tmp_dir, "source.wav")
         enhanced_wav = os.path.join(tmp_dir, "enhanced.wav")
+        log("Decoding input audio with ffmpeg")
         decode_audio_to_wav(input_path, source_wav)
 
         patch_torchaudio_load()
+        log("Importing AudioSR")
         from audiosr import build_model, super_resolution
 
         patch_strip_silence()
 
         device = "auto"
+        log("Loading AudioSR model '{}'".format(args.model_name))
         model = build_model(model_name=args.model_name, device=device)
+        log("Running AudioSR super resolution")
         waveform = super_resolution(
             model,
             source_wav,
@@ -120,8 +128,10 @@ def main():
             out_np = out_np[0]
         if out_np.ndim == 1:
             out_np = out_np.reshape(1, -1)
+        log("Encoding enhanced audio to FLAC")
         save_pcm16_wav(enhanced_wav, out_np, 48000)
         encode_audio_to_flac(enhanced_wav, output_path)
+        log("AudioSR output ready: {}".format(output_path))
 
         if args.release_model:
             try:

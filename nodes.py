@@ -78,6 +78,10 @@ GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-base",
 )
 GROUNDING_DINO_CACHE = {}
+def _openshot_log(message):
+    print("[OpenShot-ComfyUI] {}".format(message), flush=True)
+
+
 def _sam2_debug_enabled():
     # Temporary: always-on debug while we diagnose chunk/carry drift.
     return True
@@ -212,7 +216,9 @@ def _download_if_needed(model_name):
     src_name = os.path.basename(parsed.path)
     target = os.path.join(_model_storage_dir(), src_name)
     if not os.path.exists(target):
+        _openshot_log("Downloading SAM2 checkpoint '{}' from {}".format(model_name, url))
         download_url_to_file(url, target)
+        _openshot_log("Downloaded SAM2 checkpoint to {}".format(target))
     return target
 
 
@@ -530,10 +536,13 @@ def _get_groundingdino_model_and_processor(model_id, device):
     key = "{}::{}".format(str(model_id), str(device))
     if key in GROUNDING_DINO_CACHE:
         return GROUNDING_DINO_CACHE[key]
+    _openshot_log("Loading GroundingDINO processor '{}'".format(model_id))
     processor = AutoProcessor.from_pretrained(model_id)
+    _openshot_log("Loading GroundingDINO model '{}'".format(model_id))
     model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
     model.to(device)
     model.eval()
+    _openshot_log("GroundingDINO ready on {}".format(device))
     GROUNDING_DINO_CACHE[key] = (processor, model)
     return processor, model
 
