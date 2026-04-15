@@ -86,8 +86,6 @@ def ensure_deepfilternet_torchaudio_compat():
         torchaudio = importlib.import_module("torchaudio")
     except Exception:
         return
-    if "torchaudio.backend.common" in sys.modules:
-        return
     compat_audio_meta = None
     try:
         backend_common = importlib.import_module("torchaudio._backend.common")
@@ -96,9 +94,16 @@ def ensure_deepfilternet_torchaudio_compat():
         compat_audio_meta = getattr(torchaudio, "AudioMetaData", None)
     if compat_audio_meta is None:
         return
-    module = types.ModuleType("torchaudio.backend.common")
-    module.AudioMetaData = compat_audio_meta
-    sys.modules["torchaudio.backend.common"] = module
+    backend_module = sys.modules.get("torchaudio.backend")
+    if backend_module is None:
+        backend_module = types.ModuleType("torchaudio.backend")
+        sys.modules["torchaudio.backend"] = backend_module
+    common_module = sys.modules.get("torchaudio.backend.common")
+    if common_module is None:
+        common_module = types.ModuleType("torchaudio.backend.common")
+        sys.modules["torchaudio.backend.common"] = common_module
+    common_module.AudioMetaData = compat_audio_meta
+    backend_module.common = common_module
 
 
 def main():

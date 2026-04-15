@@ -55,16 +55,23 @@ else:
 try:
     import torchaudio
     import torchaudio.functional as ta_functional
-    if "torchaudio.backend.common" not in sys.modules:
+    if "torchaudio.backend.common" not in sys.modules or "torchaudio.backend" not in sys.modules:
         compat_common = None
         try:
             from torchaudio._backend.common import AudioMetaData as _CompatAudioMetaData
         except Exception:
             _CompatAudioMetaData = getattr(torchaudio, "AudioMetaData", None)
         if _CompatAudioMetaData is not None:
-            compat_common = types.ModuleType("torchaudio.backend.common")
+            compat_backend = sys.modules.get("torchaudio.backend")
+            if compat_backend is None:
+                compat_backend = types.ModuleType("torchaudio.backend")
+                sys.modules["torchaudio.backend"] = compat_backend
+            compat_common = sys.modules.get("torchaudio.backend.common")
+            if compat_common is None:
+                compat_common = types.ModuleType("torchaudio.backend.common")
+                sys.modules["torchaudio.backend.common"] = compat_common
             compat_common.AudioMetaData = _CompatAudioMetaData
-            sys.modules["torchaudio.backend.common"] = compat_common
+            compat_backend.common = compat_common
     from df.enhance import enhance as _df_enhance
     from df.enhance import init_df as _df_init_df
 except Exception as ex:  # pragma: no cover - runtime env specific
