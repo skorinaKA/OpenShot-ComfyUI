@@ -83,6 +83,32 @@ def patch_strip_silence():
     audiosr_utils.strip_silence = _no_strip
 
 
+def is_cuda_oom(ex):
+    text = str(ex or "").lower()
+    return "outofmemoryerror" in text or "out of memory" in text or "would exceed allowed memory" in text
+
+
+def run_audiosr(build_model, super_resolution, source_wav, model_name, device_name):
+    log("Loading AudioSR model '{}' on {}".format(model_name, device_name))
+    model = build_model(model_name=model_name, device=device_name)
+    try:
+        log("Running AudioSR super resolution on {}".format(device_name))
+        waveform = super_resolution(
+            model,
+            source_wav,
+            seed=42,
+            guidance_scale=3.5,
+            ddim_steps=50,
+            latent_t_per_second=12.8,
+        )
+        return waveform
+    finally:
+        try:
+            model.cpu()
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
@@ -110,18 +136,19 @@ def main():
 
         patch_strip_silence()
 
-        device = "auto"
-        log("Loading AudioSR model '{}'".format(args.model_name))
-        model = build_model(model_name=args.model_name, device=device)
-        log("Running AudioSR super resolution")
-        waveform = super_resolution(
-            model,
-            source_wav,
-            seed=42,
-            guidance_scale=3.5,
-            ddim_steps=50,
-            latent_t_per_second=12.8,
-        )
+        waveform = None
+        try:
+            waveform = run_audiosr(build_model, super_resolution, source_wav, args.model_name, "auto")
+        except Exception as ex:
+            if not is_cuda_oom(ex):
+                raise
+            log("CUDA OOM during AudioSR; retrying on CPU")
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            waveform = run_audiosr(build_model, super_resolution, source_wav, args.model_name, "cpu")
 
         out_np = np.asarray(waveform, dtype=np.float32)
         if out_np.ndim == 3:
@@ -132,12 +159,6 @@ def main():
         save_pcm16_wav(enhanced_wav, out_np, 48000)
         encode_audio_to_flac(enhanced_wav, output_path)
         log("AudioSR output ready: {}".format(output_path))
-
-        if args.release_model:
-            try:
-                model.cpu()
-            except Exception:
-                pass
         return 0
     finally:
         import shutil
