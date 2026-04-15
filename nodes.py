@@ -69,6 +69,7 @@ except Exception:
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
+AUDIOSR_ENV_VERSION = "2"
 GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-tiny",
     "IDEA-Research/grounding-dino-base",
@@ -1180,12 +1181,27 @@ def _audiosr_runner_path():
 
 def _run_checked(cmd, error_prefix):
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as ex:
-        err = (ex.stderr or "").strip()
-        if len(err) > 1200:
-            err = err[:1200] + "...(truncated)"
+        err = "\n".join(part.strip() for part in ((ex.stdout or ""), (ex.stderr or "")) if part.strip())
+        if len(err) > 4000:
+            err = err[:2000] + "\n...(truncated)...\n" + err[-1500:]
         raise RuntimeError("{}: {}".format(error_prefix, err))
+
+
+def _audiosr_env_needs_refresh(marker_path, python_path):
+    if not os.path.isfile(marker_path) or not os.path.isfile(python_path):
+        return True
+    try:
+        with open(marker_path, "r", encoding="utf-8") as handle:
+            lines = [line.strip() for line in handle.readlines() if line.strip()]
+    except Exception:
+        return True
+    if not lines:
+        return True
+    if lines[0] != AUDIOSR_ENV_VERSION:
+        return True
+    return False
 
 
 def _ensure_audiosr_environment():
@@ -1196,7 +1212,7 @@ def _ensure_audiosr_environment():
     marker_path = os.path.join(env_dir, ".ready")
     runner_path = _audiosr_runner_path()
 
-    if os.path.isfile(marker_path) and os.path.isfile(python_path):
+    if not _audiosr_env_needs_refresh(marker_path, python_path):
         return python_path
 
     builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
@@ -1223,6 +1239,7 @@ def _ensure_audiosr_environment():
             "torchlibrosa>=0.0.9",
             "tqdm",
             "progressbar",
+            "ipdb",
             "ftfy",
             "einops",
             "pandas",
@@ -1238,7 +1255,7 @@ def _ensure_audiosr_environment():
     )
 
     with open(marker_path, "w", encoding="utf-8") as handle:
-        handle.write("ok\n")
+        handle.write("{}\n".format(AUDIOSR_ENV_VERSION))
         handle.write("{}\n".format(time.time()))
     if not os.path.isfile(runner_path):
         raise RuntimeError("AudioSR runner script not found: {}".format(runner_path))
