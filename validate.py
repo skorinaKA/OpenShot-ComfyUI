@@ -1,7 +1,8 @@
 import importlib
+import os
 import shutil
+import subprocess
 import sys
-import types
 
 
 BASE_REQUIRED_MODULES = [
@@ -12,7 +13,6 @@ BASE_REQUIRED_MODULES = [
     ("transformers", "transformers"),
     ("timm", "timm"),
     ("transnetv2_pytorch", "transnetv2-pytorch"),
-    ("df", "deepfilternet"),
     ("torchaudio", "torchaudio"),
     ("sam2", "sam2"),
 ]
@@ -39,8 +39,6 @@ EXPECTED_NODES = [
 
 def check_module(import_name, label):
     try:
-        if import_name == "df":
-            ensure_deepfilternet_torchaudio_compat()
         importlib.import_module(import_name)
         print("[OK]   import {} ({})".format(import_name, label))
         return True
@@ -81,29 +79,34 @@ def module_available(import_name):
         return False
 
 
-def ensure_deepfilternet_torchaudio_compat():
+def check_deepfilternet_runner():
+    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepfilternet_runner.py")
+    if not os.path.isfile(runner):
+        print("[FAIL] deepfilternet runner missing: {}".format(runner))
+        return False
+    code = (
+        "import importlib.util, sys;"
+        "spec=importlib.util.spec_from_file_location('openshot_df_runner', sys.argv[1]);"
+        "mod=importlib.util.module_from_spec(spec);"
+        "spec.loader.exec_module(mod);"
+        "mod.ensure_torchaudio_backend_compat();"
+        "import df.enhance;"
+        "print('ok')"
+    )
     try:
-        torchaudio = importlib.import_module("torchaudio")
-    except Exception:
-        return
-    compat_audio_meta = None
-    try:
-        backend_common = importlib.import_module("torchaudio._backend.common")
-        compat_audio_meta = getattr(backend_common, "AudioMetaData", None)
-    except Exception:
-        compat_audio_meta = getattr(torchaudio, "AudioMetaData", None)
-    if compat_audio_meta is None:
-        return
-    backend_module = sys.modules.get("torchaudio.backend")
-    if backend_module is None:
-        backend_module = types.ModuleType("torchaudio.backend")
-        sys.modules["torchaudio.backend"] = backend_module
-    common_module = sys.modules.get("torchaudio.backend.common")
-    if common_module is None:
-        common_module = types.ModuleType("torchaudio.backend.common")
-        sys.modules["torchaudio.backend.common"] = common_module
-    common_module.AudioMetaData = compat_audio_meta
-    backend_module.common = common_module
+        result = subprocess.run(
+            [sys.executable, "-c", code, runner],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        print("[OK]   deepfilternet runner compatibility")
+        return True
+    except subprocess.CalledProcessError as ex:
+        err = (ex.stderr or ex.stdout or "").strip()
+        print("[FAIL] deepfilternet runner compatibility: {}".format(err or "unknown error"))
+        return False
 
 
 def main():
@@ -114,6 +117,8 @@ def main():
 
     for import_name, label in BASE_REQUIRED_MODULES:
         ok = check_module(import_name, label) and ok
+
+    ok = check_deepfilternet_runner() and ok
 
     for binary in ("ffmpeg", "ffprobe"):
         ok = check_binary(binary) and ok

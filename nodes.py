@@ -6,7 +6,6 @@ import shutil
 import sys
 import time
 import tempfile
-import types
 from contextlib import nullcontext
 from urllib.parse import urlparse
 from fractions import Fraction
@@ -54,31 +53,8 @@ else:
 
 try:
     import torchaudio
-    import torchaudio.functional as ta_functional
-    if "torchaudio.backend.common" not in sys.modules or "torchaudio.backend" not in sys.modules:
-        compat_common = None
-        try:
-            from torchaudio._backend.common import AudioMetaData as _CompatAudioMetaData
-        except Exception:
-            _CompatAudioMetaData = getattr(torchaudio, "AudioMetaData", None)
-        if _CompatAudioMetaData is not None:
-            compat_backend = sys.modules.get("torchaudio.backend")
-            if compat_backend is None:
-                compat_backend = types.ModuleType("torchaudio.backend")
-                sys.modules["torchaudio.backend"] = compat_backend
-            compat_common = sys.modules.get("torchaudio.backend.common")
-            if compat_common is None:
-                compat_common = types.ModuleType("torchaudio.backend.common")
-                sys.modules["torchaudio.backend.common"] = compat_common
-            compat_common.AudioMetaData = _CompatAudioMetaData
-            compat_backend.common = compat_common
-    from df.enhance import enhance as _df_enhance
-    from df.enhance import init_df as _df_init_df
 except Exception as ex:  # pragma: no cover - runtime env specific
-    _df_enhance = None
-    _df_init_df = None
     torchaudio = None
-    ta_functional = None
     _deepfilternet_import_error = ex
 else:
     _deepfilternet_import_error = None
@@ -91,9 +67,6 @@ GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-base",
 )
 GROUNDING_DINO_CACHE = {}
-DEEPFILTERNET_CACHE = {}
-
-
 def _sam2_debug_enabled():
     # Temporary: always-on debug while we diagnose chunk/carry drift.
     return True
@@ -153,7 +126,7 @@ def _require_transnet():
 
 
 def _require_deepfilternet():
-    if _df_enhance is None or _df_init_df is None or torchaudio is None or ta_functional is None:
+    if torchaudio is None:
         raise RuntimeError(
             "DeepFilterNet imports failed. Install requirements and restart ComfyUI. Error: {}".format(
                 _deepfilternet_import_error
@@ -1105,62 +1078,8 @@ def _encode_audio_to_flac(source_path, flac_path):
     )
 
 
-def _match_audio_length(audio, target_length):
-    target_length = int(max(0, target_length))
-    if audio is None:
-        return audio
-    current = int(audio.shape[-1])
-    if current == target_length:
-        return audio
-    if current > target_length:
-        return audio[..., :target_length]
-    pad = target_length - current
-    return F.pad(audio, (0, pad))
-
-
-def _deepfilternet_sample_rate(df_state, default=48000):
-    sr_attr = getattr(df_state, "sr", None)
-    try:
-        if callable(sr_attr):
-            return int(sr_attr())
-        if sr_attr is not None:
-            return int(sr_attr)
-    except Exception:
-        pass
-    return int(default)
-
-
-def _get_deepfilternet_bundle():
-    key = "DeepFilterNet3"
-    cached = DEEPFILTERNET_CACHE.get(key)
-    if cached is not None:
-        return cached
-    model, df_state, suffix = _df_init_df(
-        model_base_dir=None,
-        log_file=None,
-        config_allow_defaults=True,
-        default_model=key,
-    )
-    cached = {
-        "model": model,
-        "df_state": df_state,
-        "suffix": suffix,
-        "sample_rate": _deepfilternet_sample_rate(df_state),
-    }
-    DEEPFILTERNET_CACHE[key] = cached
-    return cached
-
-
-def _release_deepfilternet_bundle():
-    for bundle in list(DEEPFILTERNET_CACHE.values()):
-        model = bundle.get("model") if isinstance(bundle, dict) else None
-        if model is not None:
-            try:
-                model.cpu()
-            except Exception:
-                pass
-    DEEPFILTERNET_CACHE.clear()
-    mm.soft_empty_cache()
+def _deepfilternet_runner_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepfilternet_runner.py")
 
 
 class OpenShotSceneRangesFromSegments:
@@ -2885,44 +2804,34 @@ class OpenShotDeepFilterNetDenoiseAudio:
         if os.path.isfile(output_path):
             return (output_path,)
 
-        tmp_dir = tempfile.mkdtemp(prefix="openshot_df_audio_", dir=folder_paths.get_temp_directory())
+        runner = _deepfilternet_runner_path()
+        if not os.path.isfile(runner):
+            raise RuntimeError("DeepFilterNet runner script not found: {}".format(runner))
+
+        cmd = [
+            sys.executable,
+            runner,
+            "--input",
+            source_path,
+            "--output",
+            output_path,
+            "--amount",
+            "{:.6f}".format(noise_reduction),
+        ]
+        if not bool(keep_model_loaded):
+            cmd.append("--release-model")
+
         try:
-            source_wav = os.path.join(tmp_dir, "source.wav")
-            enhanced_wav = os.path.join(tmp_dir, "enhanced.wav")
-            _decode_audio_to_wav(source_path, source_wav)
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as ex:
+            err = (ex.stderr or "").strip()
+            if len(err) > 1000:
+                err = err[:1000] + "...(truncated)"
+            raise RuntimeError("DeepFilterNet denoise failed: {}".format(err))
 
-            source_audio, source_sr = torchaudio.load(source_wav)
-            source_audio = source_audio.to(torch.float32)
-
-            if noise_reduction <= 0.0:
-                torchaudio.save(enhanced_wav, source_audio.cpu(), int(source_sr))
-                _encode_audio_to_flac(enhanced_wav, output_path)
-                return (output_path,)
-
-            bundle = _get_deepfilternet_bundle()
-            model = bundle["model"]
-            df_state = bundle["df_state"]
-            model_sr = int(bundle["sample_rate"])
-
-            work_audio = source_audio
-            if int(source_sr) != model_sr:
-                work_audio = ta_functional.resample(work_audio, int(source_sr), model_sr)
-
-            enhanced_audio = _df_enhance(model, df_state, work_audio, pad=True)
-            enhanced_audio = (work_audio * (1.0 - noise_reduction)) + (enhanced_audio * noise_reduction)
-            enhanced_audio = torch.clamp(enhanced_audio, -1.0, 1.0)
-
-            if int(source_sr) != model_sr:
-                enhanced_audio = ta_functional.resample(enhanced_audio, model_sr, int(source_sr))
-            enhanced_audio = _match_audio_length(enhanced_audio, int(source_audio.shape[-1]))
-
-            torchaudio.save(enhanced_wav, enhanced_audio.cpu(), int(source_sr))
-            _encode_audio_to_flac(enhanced_wav, output_path)
-            return (output_path,)
-        finally:
-            if not keep_model_loaded:
-                _release_deepfilternet_bundle()
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if not os.path.isfile(output_path):
+            raise RuntimeError("DeepFilterNet denoise did not produce output: {}".format(output_path))
+        return (output_path,)
 
 
 class OpenShotGroundingDinoDetect:

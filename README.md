@@ -107,6 +107,7 @@ python validate.py
 It checks:
 
 - required Python imports
+- DeepFilterNet compatibility through the bundled runner shim
 - `ffmpeg` and `ffprobe`
 - ComfyUI-side imports needed for node registration, when ComfyUI is available
 - that the expected node classes are present, when ComfyUI is available
