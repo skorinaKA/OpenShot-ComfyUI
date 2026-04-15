@@ -21,9 +21,8 @@ def ensure_torchaudio_backend_compat():
         audio_meta = _AudioMetaData
     except Exception:
         audio_meta = getattr(torchaudio, "AudioMetaData", None)
-
     if audio_meta is None:
-        return
+        audio_meta = object
 
     if backend_module is None:
         backend_module = types.ModuleType("torchaudio.backend")
