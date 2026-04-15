@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch.hub import download_url_to_file
 from PIL import Image
+from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment, run_checked
 
 import comfy.model_management as mm
 from comfy.utils import ProgressBar, common_upscale
@@ -69,7 +70,6 @@ except Exception:
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
-AUDIOSR_ENV_VERSION = "6"
 GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-tiny",
     "IDEA-Research/grounding-dino-base",
@@ -1162,118 +1162,13 @@ def _deepfilternet_runner_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepfilternet_runner.py")
 
 
-def _audiosr_env_dir():
-    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".openshot_envs")
-    os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "audiosr")
-
-
-def _audiosr_python_path():
-    env_dir = _audiosr_env_dir()
-    if os.name == "nt":
-        return os.path.join(env_dir, "Scripts", "python.exe")
-    return os.path.join(env_dir, "bin", "python")
-
-
 def _audiosr_runner_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiosr_runner.py")
-
-
-def _run_checked(cmd, error_prefix):
-    try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as ex:
-        err = "\n".join(part.strip() for part in ((ex.stdout or ""), (ex.stderr or "")) if part.strip())
-        if len(err) > 4000:
-            err = err[:2000] + "\n...(truncated)...\n" + err[-1500:]
-        raise RuntimeError("{}: {}".format(error_prefix, err))
-
-
-def _audiosr_env_needs_refresh(marker_path, python_path):
-    if not os.path.isfile(marker_path) or not os.path.isfile(python_path):
-        return True
-    try:
-        with open(marker_path, "r", encoding="utf-8") as handle:
-            lines = [line.strip() for line in handle.readlines() if line.strip()]
-    except Exception:
-        return True
-    if not lines:
-        return True
-    if lines[0] != AUDIOSR_ENV_VERSION:
-        return True
-    return False
+    return audiosr_runner_path(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _ensure_audiosr_environment():
     _require_audiosr_bootstrap()
-
-    env_dir = _audiosr_env_dir()
-    python_path = _audiosr_python_path()
-    marker_path = os.path.join(env_dir, ".ready")
-    runner_path = _audiosr_runner_path()
-
-    if not _audiosr_env_needs_refresh(marker_path, python_path):
-        return python_path
-
-    builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
-    if not os.path.isdir(env_dir):
-        builder.create(env_dir)
-    elif not os.path.isfile(python_path):
-        builder.create(env_dir)
-
-    _run_checked([python_path, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], "AudioSR pip bootstrap failed")
-    _run_checked(
-        [
-            python_path,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "--no-deps",
-            "audiosr==0.0.7",
-        ],
-        "AudioSR core package install failed",
-    )
-    _run_checked(
-        [
-            python_path,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            "numpy<=1.23.5",
-            "librosa==0.9.2",
-            "transformers==4.30.2",
-            "soundfile",
-            "phonemizer",
-            "torchlibrosa>=0.0.9",
-            "tqdm",
-            "progressbar",
-            "ipdb",
-            "dlinfo",
-            "segments",
-            "csvw",
-            "language-tags",
-            "ftfy",
-            "einops",
-            "pandas",
-            "unidecode",
-            "chardet",
-            "pyyaml",
-            "gradio",
-            "huggingface-hub",
-            "scipy",
-            "timm",
-        ],
-        "AudioSR dependency install failed",
-    )
-
-    with open(marker_path, "w", encoding="utf-8") as handle:
-        handle.write("{}\n".format(AUDIOSR_ENV_VERSION))
-        handle.write("{}\n".format(time.time()))
-    if not os.path.isfile(runner_path):
-        raise RuntimeError("AudioSR runner script not found: {}".format(runner_path))
-    return python_path
+    return ensure_audiosr_environment(os.path.dirname(os.path.abspath(__file__)))
 
 
 class OpenShotSceneRangesFromSegments:

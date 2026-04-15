@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+from audiosr_bootstrap import audiosr_runner_path, ensure_audiosr_environment
 
 
 BASE_REQUIRED_MODULES = [
@@ -111,7 +112,8 @@ def check_deepfilternet_runner():
 
 
 def check_audiosr_runner():
-    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audiosr_runner.py")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    runner = audiosr_runner_path(base_dir)
     if not os.path.isfile(runner):
         print("[FAIL] audiosr runner missing: {}".format(runner))
         return False
@@ -119,12 +121,7 @@ def check_audiosr_runner():
         print("[OK]   audiosr runner present (skipping isolated env probe; main torch/torchaudio/torchvision not available)")
         return True
     try:
-        nodes = importlib.import_module("nodes")
-        ensure_env = getattr(nodes, "_ensure_audiosr_environment", None)
-        if not callable(ensure_env):
-            print("[FAIL] audiosr bootstrap helper missing from nodes.py")
-            return False
-        python_path = ensure_env()
+        python_path = ensure_audiosr_environment(base_dir)
     except Exception as ex:
         print("[FAIL] audiosr isolated env bootstrap: {}".format(ex))
         return False
