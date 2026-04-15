@@ -69,7 +69,7 @@ except Exception:
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
-AUDIOSR_ENV_VERSION = "2"
+AUDIOSR_ENV_VERSION = "3"
 GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-tiny",
     "IDEA-Research/grounding-dino-base",
@@ -1240,6 +1240,7 @@ def _ensure_audiosr_environment():
             "tqdm",
             "progressbar",
             "ipdb",
+            "dlinfo",
             "ftfy",
             "einops",
             "pandas",
