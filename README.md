@@ -27,6 +27,8 @@ This project addresses that gap with chunk-oriented processing designed specific
 - `OpenShotSam2VideoSegmentationChunked` (meta-batch/chunk friendly)
 - `OpenShotGroundingDinoDetect` (text-prompted object detection -> mask + JSON)
 - `OpenShotTransNetSceneDetect` (direct TransNetV2 inference -> IN/OUT JSON ranges)
+- `OpenShotDeepFilterNetDenoiseAudio` (file-path based audio denoise -> FLAC path)
+- `OpenShotLavaSRSpeechClarity` (LavaSR speech runner -> FLAC path)
 
 ## Attribution
 
@@ -41,55 +43,96 @@ Please see upstream projects for full original implementations and credits.
 
 - ComfyUI
 - PyTorch (as used by your Comfy install)
-- `decord` (required by many SAM2 video predictor builds)
-- `sam2` Python package/module available in your Comfy runtime
-- GroundingDINO runtime via Hugging Face Transformers (installed from `requirements.txt`)
-- `transnetv2-pytorch` (installed from `requirements.txt`)
+- `ffmpeg` and `ffprobe` available on your `PATH`
+- `git` available on your `PATH` for installing LavaSR from `requirements.txt`
 
 Install this node pack into `ComfyUI/custom_nodes/OpenShot-ComfyUI` and restart ComfyUI.
 
 ## Quick install (copy/paste)
 
-Install this node's Python dependencies:
+Install this node pack's Python dependencies:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Install SAM2 manually (required, not in `requirements.txt`):
+Install SAM2 separately:
 
 ```bash
-python -m pip install git+https://github.com/facebookresearch/sam2.git
+python -m pip install --no-build-isolation git+https://github.com/facebookresearch/sam2.git
 ```
 
-Optional: verify the SAM2 import works in your Comfy environment:
+Validate the environment:
 
 ```bash
-python -c "import sam2; print('sam2 import OK')"
+python validate.py
 ```
 
 Restart ComfyUI after install.
 
-### Why SAM2 is manual
+`validate.py` supports two cases:
 
-`requirements.txt` intentionally does **not** install SAM2 from Git. This avoids repeated large temporary downloads and long install times during routine updates.
+- On a regular laptop/dev environment, it validates the Python packages plus `ffmpeg`/`ffprobe`
+- Inside the actual ComfyUI Python environment, it also validates Comfy imports and node registration
 
-### GroundingDINO model downloads
+If you run it in the ComfyUI environment and it passes, restart ComfyUI and the nodes should load.
 
-`OpenShotGroundingDinoDetect` will download selected model weights from Hugging Face on first use and cache them in your HF cache directory.
+SAM2 is installed separately on purpose. Keeping it out of `requirements.txt` makes the normal dependency install much more reliable and avoids long hangs during pip's build-isolation step.
 
-### TransNet scene detection behavior
+## First-use model downloads
 
-`OpenShotTransNetSceneDetect` runs TransNetV2 inference directly and returns scene range JSON (`start_seconds`, `end_seconds`), so no external TransNet Comfy node pack is required.
+- `OpenShotDownloadAndLoadSAM2Model` downloads supported SAM2 checkpoints into `ComfyUI/models/sam2` on first use.
+- `OpenShotGroundingDinoDetect` downloads model weights from Hugging Face on first use and uses the normal HF cache.
+- `OpenShotDeepFilterNetDenoiseAudio` downloads the default `DeepFilterNet3` model on first use using DeepFilterNet's cache directory.
+- `OpenShotLavaSRSpeechClarity` downloads the `YatharthS/LavaSR` model snapshot from Hugging Face on first run.
+- `OpenShotTransNetSceneDetect` does not require a separate manual weight download from this node pack.
 
-## Models
+## Audio denoise node
 
-`OpenShotDownloadAndLoadSAM2Model` auto-downloads supported SAM2 checkpoints into `ComfyUI/models/sam2` if missing.
+`OpenShotDeepFilterNetDenoiseAudio` is intentionally minimal:
+
+- Input: `source_audio_path`, `noise_reduction`, `keep_model_loaded`
+- Output: a new FLAC file path
+- The node uses the upstream DeepFilterNet package and blends the enhanced result with the original signal using `noise_reduction` from `0.0` to `1.0`
+- `0.0` means "keep the original audio" and still emits a FLAC copy
+- `1.0` means "full denoise"
+
+The node accepts typical audio formats that `ffmpeg` can decode and always writes a new `.flac` file into ComfyUI's output folder under `openshot_audio/`.
+
+## Speech clarity node
+
+`OpenShotLavaSRSpeechClarity` is intended for low-quality speech recordings:
+
+- Input: `source_audio_path` or `audio`, `keep_model_loaded`
+- Output: a new FLAC file path
+- Uses LavaSR v2 speech enhancement
+- Intended for speech/dialogue clarity, not general music restoration
+
+LavaSR is installed through `requirements.txt` in the main Comfy environment.
+The first `Clarity -> Speech` run will still take longer because LavaSR downloads its model snapshot from Hugging Face on demand.
+
+## Validation script
+
+Run:
+
+```bash
+python validate.py
+```
+
+It checks:
+
+- required Python imports
+- DeepFilterNet compatibility through the bundled runner shim
+- `ffmpeg` and `ffprobe`
+- ComfyUI-side imports needed for node registration, when ComfyUI is available
+- that the expected node classes are present, when ComfyUI is available
 
 ## Notes
 
 - `OpenShotSam2VideoSegmentationChunked` returns only the requested chunk range (bounded memory) instead of collecting whole-video masks.
 - For very long videos, pair chunked outputs with batch-safe downstream nodes (VHS meta-batch, staged processing, or on-disk intermediates).
+- `torchaudio` is listed explicitly because DeepFilterNet imports it internally and some environments do not pull it in automatically.
+- LavaSR preserves the original channel count by processing each channel independently before recombining the output.
 
 ---
 

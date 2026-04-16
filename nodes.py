@@ -3,8 +3,10 @@ import os
 import hashlib
 import subprocess
 import shutil
+import sys
 import time
 import tempfile
+import wave
 from contextlib import nullcontext
 from urllib.parse import urlparse
 from fractions import Fraction
@@ -50,6 +52,13 @@ except Exception as ex:  # pragma: no cover - runtime env specific
 else:
     _transnet_import_error = None
 
+try:
+    import torchaudio
+except Exception as ex:  # pragma: no cover - runtime env specific
+    torchaudio = None
+    _deepfilternet_import_error = ex
+else:
+    _deepfilternet_import_error = None
 
 SAM2_MODEL_DIR = "sam2"
 OPENSHOT_NODEPACK_VERSION = "v1.1.2-track-object-keyframes"
@@ -58,6 +67,10 @@ GROUNDING_DINO_MODEL_IDS = (
     "IDEA-Research/grounding-dino-base",
 )
 GROUNDING_DINO_CACHE = {}
+def _openshot_log(message):
+    print("[OpenShot-ComfyUI] {}".format(message), flush=True)
+
+
 def _sam2_debug_enabled():
     # Temporary: always-on debug while we diagnose chunk/carry drift.
     return True
@@ -114,6 +127,24 @@ def _require_transnet():
                 _transnet_import_error
             )
         )
+
+
+def _require_deepfilternet():
+    if torchaudio is None:
+        raise RuntimeError(
+            "DeepFilterNet imports failed. Install requirements and restart ComfyUI. Error: {}".format(
+                _deepfilternet_import_error
+            )
+        )
+
+
+def _require_lavasr_bootstrap():
+    if torchaudio is None:
+        raise RuntimeError("LavaSR requires torchaudio in the main Comfy environment")
+    try:
+        from LavaSR.model import LavaEnhance2  # noqa: F401
+    except Exception as ex:
+        raise RuntimeError("LavaSR imports failed. Install requirements and restart ComfyUI. Error: {}".format(ex))
 
 
 def _model_storage_dir():
@@ -176,7 +207,9 @@ def _download_if_needed(model_name):
     src_name = os.path.basename(parsed.path)
     target = os.path.join(_model_storage_dir(), src_name)
     if not os.path.exists(target):
+        _openshot_log("Downloading SAM2 checkpoint '{}' from {}".format(model_name, url))
         download_url_to_file(url, target)
+        _openshot_log("Downloaded SAM2 checkpoint to {}".format(target))
     return target
 
 
@@ -494,10 +527,13 @@ def _get_groundingdino_model_and_processor(model_id, device):
     key = "{}::{}".format(str(model_id), str(device))
     if key in GROUNDING_DINO_CACHE:
         return GROUNDING_DINO_CACHE[key]
+    _openshot_log("Loading GroundingDINO processor '{}'".format(model_id))
     processor = AutoProcessor.from_pretrained(model_id)
+    _openshot_log("Loading GroundingDINO model '{}'".format(model_id))
     model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
     model.to(device)
     model.eval()
+    _openshot_log("GroundingDINO ready on {}".format(device))
     GROUNDING_DINO_CACHE[key] = (processor, model)
     return processor, model
 
@@ -673,6 +709,45 @@ def _resolve_video_path_for_sam2(path_text):
             return candidate2
     except Exception:
         pass
+
+    return path_text
+
+
+def _resolve_local_media_path(path_text):
+    path_text = str(path_text or "").strip()
+    if not path_text:
+        return ""
+
+    if path_text.endswith("]") and " [" in path_text:
+        path_text = path_text.rsplit(" [", 1)[0].strip()
+
+    if os.path.isabs(path_text) and os.path.exists(path_text):
+        return path_text
+
+    try:
+        resolved = folder_paths.get_annotated_filepath(path_text)
+        if resolved and os.path.exists(resolved):
+            return resolved
+    except Exception:
+        pass
+
+    for getter in (
+        getattr(folder_paths, "get_input_directory", None),
+        getattr(folder_paths, "get_output_directory", None),
+        getattr(folder_paths, "get_temp_directory", None),
+    ):
+        if not callable(getter):
+            continue
+        try:
+            root = getter()
+        except Exception:
+            continue
+        for candidate in (
+            os.path.join(root, path_text),
+            os.path.join(root, os.path.basename(path_text)),
+        ):
+            if os.path.exists(candidate):
+                return candidate
 
     return path_text
 
@@ -1008,6 +1083,116 @@ def _probe_video_info(path_text):
         "fps": fps,
         "duration": duration,
     }
+
+
+def _safe_output_directory():
+    try:
+        path = folder_paths.get_output_directory()
+    except Exception:
+        path = os.path.join(folder_paths.get_temp_directory(), "openshot_outputs")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _sanitize_filename_part(text, default="file"):
+    text = str(text or "").strip()
+    if not text:
+        return default
+    allowed = []
+    for ch in text:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            allowed.append(ch)
+        else:
+            allowed.append("_")
+    cleaned = "".join(allowed).strip("._")
+    return cleaned or default
+
+
+def _run_ffmpeg_audio(args, error_prefix):
+    cmd = ["ffmpeg", "-y"] + list(args)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg not found; required for audio processing")
+    except subprocess.CalledProcessError as ex:
+        err = (ex.stderr or "").strip()
+        if len(err) > 500:
+            err = err[:500] + "...(truncated)"
+        raise RuntimeError("{}: {}".format(error_prefix, err))
+
+
+def _decode_audio_to_wav(source_path, wav_path):
+    _run_ffmpeg_audio(
+        ["-i", source_path, "-vn", "-acodec", "pcm_s16le", wav_path],
+        "ffmpeg audio decode failed",
+    )
+
+
+def _encode_audio_to_flac(source_path, flac_path):
+    _run_ffmpeg_audio(
+        ["-i", source_path, "-vn", "-c:a", "flac", flac_path],
+        "ffmpeg FLAC encode failed",
+    )
+
+
+def _save_comfy_audio_to_wav(audio, wav_path):
+    if not isinstance(audio, dict):
+        raise ValueError("Invalid AUDIO input")
+    waveform = audio.get("waveform")
+    sample_rate = int(audio.get("sample_rate", 0) or 0)
+    if waveform is None or sample_rate <= 0:
+        raise ValueError("AUDIO input missing waveform or sample_rate")
+
+    tensor = waveform.detach().cpu()
+    if tensor.ndim != 3:
+        raise ValueError("Expected AUDIO waveform with shape [batch, channels, samples]")
+    if int(tensor.shape[0]) <= 0:
+        raise ValueError("AUDIO waveform batch is empty")
+    tensor = tensor[0]
+    if tensor.ndim != 2:
+        raise ValueError("Expected AUDIO waveform channels dimension")
+
+    audio_np = np.clip(tensor.numpy(), -1.0, 1.0)
+    pcm = np.round(audio_np * 32767.0).astype("<i2").T
+    with wave.open(wav_path, "wb") as wav_file:
+        wav_file.setnchannels(int(audio_np.shape[0]))
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm.tobytes())
+
+
+def _deepfilternet_runner_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepfilternet_runner.py")
+
+
+def _lavasr_runner_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavasr_runner.py")
+
+
+def _run_checked(cmd, error_prefix):
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        lines = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            text = line.rstrip()
+            if text:
+                print(text, flush=True)
+                lines.append(text)
+        returncode = proc.wait()
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd, output="\n".join(lines), stderr="")
+    except subprocess.CalledProcessError as ex:
+        err = "\n".join(part.strip() for part in ((ex.output or ""), (ex.stderr or "")) if part.strip())
+        if len(err) > 4000:
+            err = err[:2000] + "\n...(truncated)...\n" + err[-1500:]
+        raise RuntimeError("{}: {}".format(error_prefix, err))
 
 
 class OpenShotSceneRangesFromSegments:
@@ -2682,6 +2867,185 @@ class OpenShotImageHighlightMasked:
         return (out.to(mm.intermediate_device()),)
 
 
+class OpenShotDeepFilterNetDenoiseAudio:
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return ""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_audio_path": ("STRING", {"default": ""}),
+                "noise_reduction": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("denoised_audio_path",)
+    FUNCTION = "denoise"
+    CATEGORY = "OpenShot/Audio"
+
+    def _resolve_source_path(self, source_audio_path):
+        source_path = _resolve_local_media_path(source_audio_path)
+        source_path = str(source_path or "").strip()
+        if not source_path or not os.path.isfile(source_path):
+            raise ValueError("Audio path not found: {}".format(source_audio_path))
+        return source_path
+
+    def _build_output_path(self, source_path, noise_reduction):
+        output_dir = os.path.join(_safe_output_directory(), "openshot_audio")
+        os.makedirs(output_dir, exist_ok=True)
+        stem = _sanitize_filename_part(os.path.splitext(os.path.basename(source_path))[0], default="audio")
+        stat = os.stat(source_path)
+        key = "{}|{}|{}|{:.4f}".format(
+            source_path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            float(noise_reduction),
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+        return os.path.join(output_dir, "{}_denoised_{}.flac".format(stem, digest))
+
+    def denoise(self, source_audio_path, noise_reduction, keep_model_loaded, audio=None):
+        _require_deepfilternet()
+
+        temp_source_dir = None
+        if audio is not None:
+            temp_source_dir = tempfile.mkdtemp(prefix="openshot_audio_input_", dir=folder_paths.get_temp_directory())
+            source_path = os.path.join(temp_source_dir, "input.wav")
+            _save_comfy_audio_to_wav(audio, source_path)
+        else:
+            source_path = self._resolve_source_path(source_audio_path)
+        noise_reduction = float(max(0.0, min(1.0, float(noise_reduction))))
+        output_path = self._build_output_path(source_path, noise_reduction)
+        if os.path.isfile(output_path):
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
+            return (output_path,)
+
+        runner = _deepfilternet_runner_path()
+        if not os.path.isfile(runner):
+            raise RuntimeError("DeepFilterNet runner script not found: {}".format(runner))
+
+        cmd = [
+            sys.executable,
+            runner,
+            "--input",
+            source_path,
+            "--output",
+            output_path,
+            "--amount",
+            "{:.6f}".format(noise_reduction),
+        ]
+        if not bool(keep_model_loaded):
+            cmd.append("--release-model")
+
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as ex:
+            err = (ex.stderr or "").strip()
+            if len(err) > 1000:
+                err = err[:1000] + "...(truncated)"
+            raise RuntimeError("DeepFilterNet denoise failed: {}".format(err))
+        finally:
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
+
+        if not os.path.isfile(output_path):
+            raise RuntimeError("DeepFilterNet denoise did not produce output: {}".format(output_path))
+        return (output_path,)
+
+
+class OpenShotLavaSRSpeechClarity:
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return ""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_audio_path": ("STRING", {"default": ""}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("clarified_speech_audio_path",)
+    FUNCTION = "enhance"
+    CATEGORY = "OpenShot/Audio"
+
+    def _resolve_source_path(self, source_audio_path):
+        source_path = _resolve_local_media_path(source_audio_path)
+        source_path = str(source_path or "").strip()
+        if not source_path or not os.path.isfile(source_path):
+            raise ValueError("Audio path not found: {}".format(source_audio_path))
+        return source_path
+
+    def _build_output_path(self, source_path):
+        output_dir = os.path.join(_safe_output_directory(), "openshot_audio")
+        os.makedirs(output_dir, exist_ok=True)
+        stem = _sanitize_filename_part(os.path.splitext(os.path.basename(source_path))[0], default="audio")
+        stat = os.stat(source_path)
+        key = "{}|{}|{}".format(
+            source_path,
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+        return os.path.join(output_dir, "{}_clarity_speech_{}.flac".format(stem, digest))
+
+    def enhance(self, source_audio_path, keep_model_loaded, audio=None):
+        temp_source_dir = None
+        if audio is not None:
+            temp_source_dir = tempfile.mkdtemp(prefix="openshot_audio_input_", dir=folder_paths.get_temp_directory())
+            source_path = os.path.join(temp_source_dir, "input.wav")
+            _save_comfy_audio_to_wav(audio, source_path)
+        else:
+            source_path = self._resolve_source_path(source_audio_path)
+
+        output_path = self._build_output_path(source_path)
+        if os.path.isfile(output_path):
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
+            return (output_path,)
+
+        runner = _lavasr_runner_path()
+        if not os.path.isfile(runner):
+            raise RuntimeError("LavaSR runner script not found: {}".format(runner))
+        _require_lavasr_bootstrap()
+        python_path = sys.executable
+
+        cmd = [
+            python_path,
+            runner,
+            "--input",
+            source_path,
+            "--output",
+            output_path,
+        ]
+        if not bool(keep_model_loaded):
+            cmd.append("--release-model")
+
+        try:
+            _run_checked(cmd, "LavaSR enhancement failed")
+        finally:
+            if temp_source_dir:
+                shutil.rmtree(temp_source_dir, ignore_errors=True)
+
+        if not os.path.isfile(output_path):
+            raise RuntimeError("LavaSR enhancement did not produce output: {}".format(output_path))
+        return (output_path,)
+
+
 class OpenShotGroundingDinoDetect:
     _model_cache = {}
 
@@ -2837,6 +3201,8 @@ NODE_CLASS_MAPPINGS = {
     "OpenShotSam2VideoSegmentationChunked": OpenShotSam2VideoSegmentationChunked,
     "OpenShotImageBlurMasked": OpenShotImageBlurMasked,
     "OpenShotImageHighlightMasked": OpenShotImageHighlightMasked,
+    "OpenShotDeepFilterNetDenoiseAudio": OpenShotDeepFilterNetDenoiseAudio,
+    "OpenShotLavaSRSpeechClarity": OpenShotLavaSRSpeechClarity,
     "OpenShotGroundingDinoDetect": OpenShotGroundingDinoDetect,
     "OpenShotSceneRangesFromSegments": OpenShotSceneRangesFromSegments,
 }
@@ -2849,6 +3215,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenShotSam2VideoSegmentationChunked": "OpenShot SAM2 Video Segmentation (Chunked)",
     "OpenShotImageBlurMasked": "OpenShot Blur Masked (Skip Empty)",
     "OpenShotImageHighlightMasked": "OpenShot Highlight Masked",
+    "OpenShotDeepFilterNetDenoiseAudio": "OpenShot DeepFilterNet Audio Denoise",
+    "OpenShotLavaSRSpeechClarity": "OpenShot LavaSR Speech Clarity",
     "OpenShotGroundingDinoDetect": "OpenShot GroundingDINO Detect",
     "OpenShotSceneRangesFromSegments": "OpenShot Scene Ranges From Segments",
 }

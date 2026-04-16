@@ -6,8 +6,7 @@ decord
 transformers>=4.39
 timm>=0.9
 transnetv2-pytorch
-
-# IMPORTANT:
-# SAM2 is intentionally NOT installed from this file to avoid repeated
-# large git downloads during normal dependency updates.
-# Ensure your Comfy environment already has a compatible `sam2` installed.
+deepfilternet==0.5.6
+torchaudio
+git+https://github.com/ysharma3501/LavaSR.git
+huggingface-hub
