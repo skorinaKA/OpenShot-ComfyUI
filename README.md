@@ -28,7 +28,7 @@ This project addresses that gap with chunk-oriented processing designed specific
 - `OpenShotGroundingDinoDetect` (text-prompted object detection -> mask + JSON)
 - `OpenShotTransNetSceneDetect` (direct TransNetV2 inference -> IN/OUT JSON ranges)
 - `OpenShotDeepFilterNetDenoiseAudio` (file-path based audio denoise -> FLAC path)
-- `OpenShotLavaSRSpeechClarity` (isolated LavaSR speech runner -> FLAC path)
+- `OpenShotLavaSRSpeechClarity` (LavaSR speech runner -> FLAC path)
 
 ## Attribution
 
@@ -44,7 +44,7 @@ Please see upstream projects for full original implementations and credits.
 - ComfyUI
 - PyTorch (as used by your Comfy install)
 - `ffmpeg` and `ffprobe` available on your `PATH`
-- `git` available on your `PATH` for LavaSR's first-use isolated install
+- `git` available on your `PATH` for installing LavaSR from `requirements.txt`
 
 Install this node pack into `ComfyUI/custom_nodes/OpenShot-ComfyUI` and restart ComfyUI.
 
@@ -84,7 +84,7 @@ SAM2 is installed separately on purpose. Keeping it out of `requirements.txt` ma
 - `OpenShotDownloadAndLoadSAM2Model` downloads supported SAM2 checkpoints into `ComfyUI/models/sam2` on first use.
 - `OpenShotGroundingDinoDetect` downloads model weights from Hugging Face on first use and uses the normal HF cache.
 - `OpenShotDeepFilterNetDenoiseAudio` downloads the default `DeepFilterNet3` model on first use using DeepFilterNet's cache directory.
-- `OpenShotLavaSRSpeechClarity` creates an isolated local venv on first use, installs LavaSR there, and then downloads the `YatharthS/LavaSR` model snapshot from Hugging Face on first run.
+- `OpenShotLavaSRSpeechClarity` downloads the `YatharthS/LavaSR` model snapshot from Hugging Face on first run.
 - `OpenShotTransNetSceneDetect` does not require a separate manual weight download from this node pack.
 
 ## Audio denoise node
@@ -108,8 +108,8 @@ The node accepts typical audio formats that `ffmpeg` can decode and always write
 - Uses LavaSR v2 speech enhancement
 - Intended for speech/dialogue clarity, not general music restoration
 
-LavaSR is installed into an isolated runner environment on first use so the main Comfy environment stays stable.
-That means there is no extra install command for LavaSR, but the first `Clarity -> Speech` run will take longer while the isolated environment and model snapshot are prepared.
+LavaSR is installed through `requirements.txt` in the main Comfy environment.
+The first `Clarity -> Speech` run will still take longer because LavaSR downloads its model snapshot from Hugging Face on demand.
 
 ## Validation script
 
@@ -132,7 +132,7 @@ It checks:
 - `OpenShotSam2VideoSegmentationChunked` returns only the requested chunk range (bounded memory) instead of collecting whole-video masks.
 - For very long videos, pair chunked outputs with batch-safe downstream nodes (VHS meta-batch, staged processing, or on-disk intermediates).
 - `torchaudio` is listed explicitly because DeepFilterNet imports it internally and some environments do not pull it in automatically.
-- LavaSR uses a separate on-demand runner environment and preserves the original channel count by processing each channel independently before recombining the output.
+- LavaSR preserves the original channel count by processing each channel independently before recombining the output.
 
 ---
 

@@ -3,10 +3,6 @@ import os
 import shutil
 import subprocess
 import sys
-try:
-    from .lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment
-except Exception:
-    from lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment
 
 
 BASE_REQUIRED_MODULES = [
@@ -116,17 +112,14 @@ def check_deepfilternet_runner():
 
 def check_lavasr_runner():
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    runner = lavasr_runner_path(base_dir)
+    runner = os.path.join(base_dir, "lavasr_runner.py")
     if not os.path.isfile(runner):
         print("[FAIL] lavasr runner missing: {}".format(runner))
         return False
-    if not module_available("torch") or not module_available("torchaudio"):
-        print("[OK]   lavasr runner present (skipping isolated env probe; main torch/torchaudio not available)")
-        return True
     try:
-        python_path = ensure_lavasr_environment(base_dir)
+        importlib.import_module("LavaSR.model")
     except Exception as ex:
-        print("[FAIL] lavasr isolated env bootstrap: {}".format(ex))
+        print("[FAIL] import LavaSR.model (LavaSR): {}".format(ex))
         return False
 
     code = (
@@ -136,17 +129,17 @@ def check_lavasr_runner():
     )
     try:
         subprocess.run(
-            [python_path, "-c", code],
+            [sys.executable, "-c", code],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        print("[OK]   lavasr isolated env import compatibility")
+        print("[OK]   lavasr runner compatibility")
         return True
     except subprocess.CalledProcessError as ex:
         err = "\n".join(part.strip() for part in ((ex.stdout or ""), (ex.stderr or "")) if part.strip())
-        print("[FAIL] lavasr isolated env import compatibility: {}".format(err or "unknown error"))
+        print("[FAIL] lavasr runner compatibility: {}".format(err or "unknown error"))
         return False
 
 

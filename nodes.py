@@ -16,10 +16,6 @@ import torch
 import torch.nn.functional as F
 from torch.hub import download_url_to_file
 from PIL import Image
-try:
-    from .lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment, run_checked
-except Exception:
-    from lavasr_bootstrap import lavasr_runner_path, ensure_lavasr_environment, run_checked
 
 import comfy.model_management as mm
 from comfy.utils import ProgressBar, common_upscale
@@ -144,7 +140,11 @@ def _require_deepfilternet():
 
 def _require_lavasr_bootstrap():
     if torchaudio is None:
-        raise RuntimeError("LavaSR bootstrap requires torchaudio in the main Comfy environment")
+        raise RuntimeError("LavaSR requires torchaudio in the main Comfy environment")
+    try:
+        from LavaSR.model import LavaEnhance2  # noqa: F401
+    except Exception as ex:
+        raise RuntimeError("LavaSR imports failed. Install requirements and restart ComfyUI. Error: {}".format(ex))
 
 
 def _model_storage_dir():
@@ -1166,12 +1166,33 @@ def _deepfilternet_runner_path():
 
 
 def _lavasr_runner_path():
-    return lavasr_runner_path(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "lavasr_runner.py")
 
 
-def _ensure_lavasr_environment():
-    _require_lavasr_bootstrap()
-    return ensure_lavasr_environment(os.path.dirname(os.path.abspath(__file__)))
+def _run_checked(cmd, error_prefix):
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        lines = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            text = line.rstrip()
+            if text:
+                print(text, flush=True)
+                lines.append(text)
+        returncode = proc.wait()
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd, output="\n".join(lines), stderr="")
+    except subprocess.CalledProcessError as ex:
+        err = "\n".join(part.strip() for part in ((ex.output or ""), (ex.stderr or "")) if part.strip())
+        if len(err) > 4000:
+            err = err[:2000] + "\n...(truncated)...\n" + err[-1500:]
+        raise RuntimeError("{}: {}".format(error_prefix, err))
 
 
 class OpenShotSceneRangesFromSegments:
@@ -3000,7 +3021,8 @@ class OpenShotLavaSRSpeechClarity:
         runner = _lavasr_runner_path()
         if not os.path.isfile(runner):
             raise RuntimeError("LavaSR runner script not found: {}".format(runner))
-        python_path = _ensure_lavasr_environment()
+        _require_lavasr_bootstrap()
+        python_path = sys.executable
 
         cmd = [
             python_path,
@@ -3014,7 +3036,7 @@ class OpenShotLavaSRSpeechClarity:
             cmd.append("--release-model")
 
         try:
-            run_checked(cmd, "LavaSR enhancement failed")
+            _run_checked(cmd, "LavaSR enhancement failed")
         finally:
             if temp_source_dir:
                 shutil.rmtree(temp_source_dir, ignore_errors=True)
