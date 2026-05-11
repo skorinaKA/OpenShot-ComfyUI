@@ -35,6 +35,7 @@ EXPECTED_NODES = [
     "OpenShotLavaSRSpeechClarity",
     "OpenShotGroundingDinoDetect",
     "OpenShotSceneRangesFromSegments",
+    "OpenShotFFmpegCommandGenerator",
 ]
 
 

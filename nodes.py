@@ -4,6 +4,8 @@ import hashlib
 import subprocess
 import shutil
 import sys
+import shlex
+import re
 import time
 import tempfile
 import wave
@@ -22,6 +24,16 @@ from comfy.utils import ProgressBar, common_upscale
 import folder_paths
 from hydra import initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
+
+try:
+    import ollama
+except Exception:
+    ollama = None
+
+try:
+    import openai
+except Exception:
+    openai = None
 
 try:
     import sam2.build_sam as sam2_build
@@ -992,6 +1004,7 @@ class OpenShotTransNetSceneDetect:
         return [(float(s), float(e)) for s, e in out if e > s]
 
     def detect(self, source_video_path, threshold, min_scene_length_frames, device):
+        print(self.__class__.__name__)
         _require_transnet()
         video_path = _resolve_video_path_for_sam2(source_video_path)
         if not video_path or not os.path.exists(video_path):
@@ -1258,6 +1271,7 @@ class OpenShotSceneRangesFromSegments:
         return "{:02d};{:02d}".format(secs, frames)
 
     def build(self, segment_paths, source_video_path, fallback_fps=30.0):
+        print(self.__class__.__name__)
         paths = self._as_path_list(segment_paths)
         if not paths:
             return (json.dumps({"segments": []}),)
@@ -1341,6 +1355,7 @@ class OpenShotDownloadAndLoadSAM2Model:
     CATEGORY = "OpenShot/SAM2"
 
     def load(self, model, segmentor, device, precision):
+        print(self.__class__.__name__)
         _require_sam2()
 
         checkpoint = _download_if_needed(model)
@@ -1434,6 +1449,7 @@ class OpenShotSam2Segmentation:
         dino_device="auto",
         base_mask=None,
     ):
+        print(self.__class__.__name__)
         _require_sam2()
 
         model = sam2_model["model"]
@@ -1584,6 +1600,7 @@ class OpenShotSam2VideoSegmentationAddPoints:
         base_mask=None,
         meta_batch=None,
     ):
+        print(self.__class__.__name__)
         model = sam2_model["model"]
         device = sam2_model["device"]
         dtype = sam2_model["dtype"]
@@ -2542,6 +2559,7 @@ class OpenShotSam2VideoSegmentationChunked:
         return (stacked,)
 
     def segment_chunk(self, sam2_model, inference_state, image, start_frame, chunk_size_frames, keep_model_loaded, meta_batch=None):
+        print(self.__class__.__name__)
         model = sam2_model["model"]
         device = sam2_model["device"]
         dtype = sam2_model["dtype"]
@@ -2739,6 +2757,7 @@ class OpenShotImageBlurMasked:
     CATEGORY = "OpenShot/Video"
 
     def blur_masked(self, image, mask, blur_radius, sigma):
+        print(self.__class__.__name__)
         blur_radius = int(max(0, blur_radius))
         if blur_radius == 0:
             return (image,)
@@ -2811,6 +2830,7 @@ class OpenShotImageHighlightMasked:
         mask_brightness,
         background_brightness,
     ):
+        print(self.__class__.__name__)
         hi_r, hi_g, hi_b, hi_a = _parse_color_rgba(highlight_color, default=(0.96, 0.84, 0.26, 1.0))
         bo_r, bo_g, bo_b, bo_a = _parse_color_rgba(border_color, default=(0.0, 0.0, 0.0, 0.0))
         hi_alpha = float(max(0.0, min(1.0, float(highlight_opacity)))) * float(hi_a)
@@ -2912,6 +2932,7 @@ class OpenShotDeepFilterNetDenoiseAudio:
         return os.path.join(output_dir, "{}_denoised_{}.flac".format(stem, digest))
 
     def denoise(self, source_audio_path, noise_reduction, keep_model_loaded, audio=None):
+        print(self.__class__.__name__)
         _require_deepfilternet()
 
         temp_source_dir = None
@@ -3004,6 +3025,7 @@ class OpenShotLavaSRSpeechClarity:
         return os.path.join(output_dir, "{}_clarity_speech_{}.flac".format(stem, digest))
 
     def enhance(self, source_audio_path, keep_model_loaded, audio=None):
+        print(self.__class__.__name__)
         temp_source_dir = None
         if audio is not None:
             temp_source_dir = tempfile.mkdtemp(prefix="openshot_audio_input_", dir=folder_paths.get_temp_directory())
@@ -3111,6 +3133,7 @@ class OpenShotGroundingDinoDetect:
         return frame_mask
 
     def detect(self, image, prompt, model_id, box_threshold, text_threshold, device, keep_model_loaded):
+        print(self.__class__.__name__)
         _require_groundingdino()
 
         prompt = str(prompt or "").strip()
@@ -3193,6 +3216,264 @@ class OpenShotGroundingDinoDetect:
         return (mask_tensor, json.dumps(all_detections))
 
 
+class OpenShotFFmpegCommandGenerator:
+    CATEGORY = "OpenShot/FFmpeg"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "Конвертировать видео из MP4 в AVI",
+                }),
+                "source_video_path": ("STRING", {"default": "__openshot_input__"}),
+                "model_type": (("ollama", "openai"),),
+                "temperature": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "allow_dangerous_commands": ("BOOLEAN", {"default": False}),
+                "timeout_seconds": ("INT", {"default": 300, "min": 1, "max": 3600}),
+                "show_output": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "working_directory": ("STRING", {"default": ""}),
+                "ollama_host": ("STRING", {"default": "http://localhost:11434"}),
+                "ollama_model_name": ("STRING", {"default": "gpt-oss:20b"}),
+                "openai_api_key": ("STRING", {"default": ""}),
+                "openai_model_name": ("STRING", {"default": "gpt-4"}),
+                "openai_base_url": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "BOOLEAN", "STRING", "STRING", "BOOLEAN", "STRING")
+    RETURN_NAMES = (
+        "text",
+        "ffmpeg_command",
+        "is_valid",
+        "validation_message",
+        "execution_output",
+        "execution_success",
+        "execution_message",
+    )
+    FUNCTION = "run"
+
+    def run(
+        self,
+        text,
+        source_video_path,
+        model_type,
+        temperature,
+        allow_dangerous_commands,
+        timeout_seconds,
+        show_output,
+        working_directory="",
+        ollama_host="http://localhost:11434",
+        ollama_model_name="gpt-oss:20b",
+        openai_api_key="",
+        openai_model_name="gpt-4",
+        openai_base_url="",
+    ):
+        print(self.__class__.__name__)
+        prompt = """Ты — эксперт по FFmpeg. Твоя задача — получать запросы пользователя на русском языке и генерировать для них максимально точные и рабочие команды FFmpeg.
+Правила:
+1. Отвечай только готовой командой FFmpeg.
+2. Никаких пояснений, только команда.
+3. Используй одинарные кавычки для путей с пробелами.
+Пример:
+Запрос: "обрезать видео input.mp4 с 10 по 20 секунду"
+Команда: ffmpeg -i input.mp4 -ss 00:00:10 -to 00:00:20 -c copy output.mp4"""
+
+        source_video_path = str(source_video_path or "").strip()
+        if not source_video_path:
+            return "", "", False, "❌ Не указан путь к видеофайлу", "", False, "❌ Не указан путь к видеофайлу"
+
+        source_video_path = _resolve_local_media_path(source_video_path)
+        if not source_video_path or not os.path.isfile(source_video_path):
+            return "", "", False, "❌ Видеофайл не найден: {}".format(source_video_path), "", False, "❌ Видеофайл не найден: {}".format(source_video_path)
+
+        absolute_output_path, output_video_path = self._build_output_path(source_video_path, working_directory)
+
+        print("Resolved source video path:", source_video_path)
+        print("Determined output video path:", absolute_output_path)
+        print("ComfyUI output ref:", output_video_path)
+
+        prompt = f"""Ты — эксперт по FFmpeg. Твоя задача — получать запросы пользователя на русском языке и генерировать для них максимально точные и рабочие команды FFmpeg.
+Правила:
+1. Отвечай только готовой командой FFmpeg.
+2. Никаких пояснений, только команда.
+3. Используй одинарные кавычки для путей с пробелами.
+4. Входной файл: {source_video_path}
+5. Выходной файл: {absolute_output_path}
+6. Обязательно запиши результат именно в указанный выходной файл.
+Пример:
+Запрос: "обрезать видео input.mp4 с 10 по 20 секунду"
+Команда: ffmpeg -i input.mp4 -ss 00:00:10 -to 00:00:20 -c copy output.mp4"""
+
+        if model_type == "ollama":
+            ffmpeg_command = self._generate_ollama(text, prompt, ollama_host, ollama_model_name, temperature)
+        elif model_type == "openai":
+            ffmpeg_command = self._generate_openai(text, prompt, openai_api_key, openai_model_name, openai_base_url, temperature)
+        else:
+            ffmpeg_command = f"❌ Неподдерживаемый тип модели: {model_type}"
+
+        print("Generated FFmpeg command:", ffmpeg_command)
+
+        if isinstance(ffmpeg_command, tuple):
+            ffmpeg_command = ffmpeg_command[0]
+
+        ffmpeg_command = str(ffmpeg_command or "").strip()
+        is_valid, validation_message = self._validate_command(ffmpeg_command, allow_dangerous_commands, absolute_output_path)
+
+        print("Command validation:", validation_message)
+
+        execution_output = ""
+        execution_success = False
+        execution_message = ""
+
+        print("Executing FFmpeg command:", ffmpeg_command)
+        if is_valid:
+            execution_output, execution_success, execution_message = self._execute_command(
+                ffmpeg_command,
+                timeout_seconds,
+                show_output,
+                working_directory,
+            )
+        else:
+            execution_message = "❌ Команда не была выполнена из-за невалидности."
+
+        print("Execution success:", execution_success)
+        print("Execution message:", execution_message)
+
+        # Return output_video_path in ComfyUI-compatible format for file extraction
+        # The node marks this as a TEXT output that can be extracted as a file path
+        return (
+            output_video_path,  # /outputs/video/filename format for ComfyUI to recognize
+            ffmpeg_command,
+            is_valid,
+            validation_message,
+            execution_output,
+            execution_success,
+            execution_message,
+        )
+
+    def _generate_ollama(self, text, prompt, host, model_name, temperature):
+        if ollama is None:
+            return "❌ Модуль ollama не установлен"
+        client = ollama.Client(host=host)
+        response = client.chat(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text},
+            ],
+            options={"temperature": temperature},
+        )
+        return response["message"]["content"].strip()
+
+    def _generate_openai(self, text, prompt, api_key, model_name, base_url, temperature):
+        if openai is None:
+            return "❌ Модуль openai не установлен"
+        if not api_key:
+            return "❌ Не указан OpenAI API ключ"
+        if hasattr(openai, "OpenAI"):
+            client = openai.OpenAI(api_key=api_key, base_url=base_url or None)
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": text},
+                ],
+                temperature=temperature,
+            )
+            return response.choices[0].message.content.strip()
+        openai.api_key = api_key
+        if base_url:
+            openai.api_base = base_url
+        response = openai.ChatCompletion.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": text},
+            ],
+            temperature=temperature,
+        )
+        return response["choices"][0]["message"]["content"].strip()
+
+    def _build_output_path(self, source_video_path, working_directory):
+        source_video_path = str(source_video_path or "").strip()
+        if not source_video_path:
+            return "", ""
+        source_video_path = os.path.abspath(source_video_path)
+        # Always use ComfyUI's output/video directory
+        base_output_dir = os.path.join(folder_paths.get_output_directory(), "video")
+        os.makedirs(base_output_dir, exist_ok=True)
+        source_name, source_ext = os.path.splitext(os.path.basename(source_video_path))
+        if not source_ext:
+            source_ext = ".mp4"
+        suffix = "_txt2ff"
+        output_name = f"{source_name}{suffix}{source_ext}"
+        output_path = os.path.join(base_output_dir, output_name)
+        counter = 1
+        while os.path.exists(output_path):
+            output_name = f"{source_name}{suffix}_{counter}{source_ext}"
+            output_path = os.path.join(base_output_dir, output_name)
+            counter += 1
+        # Return absolute path for FFmpeg and /outputs/video/ format for ComfyUI recognition
+        return output_path, f"/outputs/video/{output_name}"
+
+    def _validate_command(self, ffmpeg_command, allow_dangerous_commands, output_video_path=""):
+        if not ffmpeg_command:
+            return False, "❌ Команда не может быть пустой"
+        if not ffmpeg_command.startswith("ffmpeg"):
+            return False, "❌ Команда должна начинаться с 'ffmpeg'"
+        try:
+            args = shlex.split(ffmpeg_command)
+        except Exception as e:
+            return False, f"❌ Ошибка синтаксиса: {str(e)}"
+        if "-i" not in args:
+            return False, "❌ Команда должна содержать входной файл (-i)"
+        if output_video_path:
+            normalized_path = str(output_video_path).strip()
+            normalized_path_alt = normalized_path.replace("\\", "/")
+            if normalized_path not in ffmpeg_command and normalized_path_alt not in ffmpeg_command:
+                return False, f"❌ Команда должна содержать заранее заданный выходной файл: {normalized_path}"
+        if not allow_dangerous_commands:
+            dangerous = [r"rm\s", r"del\s", r";\s*rm", r"&&", r"\|\s*rm", r"\|\s*del", r">>", r"\|\s*bash"]
+            for pattern in dangerous:
+                if re.search(pattern, ffmpeg_command):
+                    return False, f"⚠️ Обнаружен потенциально опасный фрагмент: {pattern}"
+        return True, "✅ Команда валидна и готова к выполнению"
+
+    def _execute_command(self, ffmpeg_command, timeout_seconds, show_output, working_directory):
+        if not ffmpeg_command:
+            return "", False, "❌ Команда не может быть пустой"
+        if shutil.which("ffmpeg") is None:
+            return "", False, "❌ FFmpeg не найден в PATH"
+        cwd = working_directory if working_directory and os.path.isdir(working_directory) else os.getcwd()
+        try:
+            proc = subprocess.run(
+                shlex.split(ffmpeg_command),
+                shell=True,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=int(timeout_seconds),
+            )
+            output = ""
+            if show_output:
+                if proc.stdout:
+                    output += f"STDOUT:\n{proc.stdout}\n"
+                if proc.stderr:
+                    output += f"STDERR:\n{proc.stderr}\n"
+            success = proc.returncode == 0
+            message = "✅ Команда выполнена успешно" if success else f"❌ Команда завершилась с ошибкой (код {proc.returncode})"
+            return output, success, message
+        except subprocess.TimeoutExpired:
+            return "", False, f"⏱️ Таймаут: команда превысила {timeout_seconds} секунд"
+        except Exception as e:
+            return "", False, f"❌ Ошибка выполнения: {str(e)}"
+
+
 NODE_CLASS_MAPPINGS = {
     "OpenShotTransNetSceneDetect": OpenShotTransNetSceneDetect,
     "OpenShotDownloadAndLoadSAM2Model": OpenShotDownloadAndLoadSAM2Model,
@@ -3205,6 +3486,7 @@ NODE_CLASS_MAPPINGS = {
     "OpenShotLavaSRSpeechClarity": OpenShotLavaSRSpeechClarity,
     "OpenShotGroundingDinoDetect": OpenShotGroundingDinoDetect,
     "OpenShotSceneRangesFromSegments": OpenShotSceneRangesFromSegments,
+    "OpenShotFFmpegCommandGenerator": OpenShotFFmpegCommandGenerator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3219,4 +3501,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenShotLavaSRSpeechClarity": "OpenShot LavaSR Speech Clarity",
     "OpenShotGroundingDinoDetect": "OpenShot GroundingDINO Detect",
     "OpenShotSceneRangesFromSegments": "OpenShot Scene Ranges From Segments",
+    "OpenShotFFmpegCommandGenerator": "OpenShot FFmpeg Command",
 }
